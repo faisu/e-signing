@@ -5,6 +5,7 @@ import { detectHelper } from './helper-detect';
 import {
   listCertificates,
   filterSigningCerts,
+  hasIdealClass3Profile,
   signHash,
 } from './helper-client';
 import type {
@@ -20,6 +21,7 @@ export interface UseDscSignerReturn {
   helper: HelperInfo | null;
   certs: DscCertificate[];
   chosenCert: DscCertificate | null;
+  warning: string | null;
 
   detect: () => Promise<void>;
   enumerate: () => Promise<void>;
@@ -43,6 +45,7 @@ export function useDscSigner(): UseDscSignerReturn {
   const [helper, setHelper] = useState<HelperInfo | null>(null);
   const [certs, setCerts] = useState<DscCertificate[]>([]);
   const [chosenCert, setChosenCert] = useState<DscCertificate | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   const setErr = (code: SigningError['code'], message: string) => {
@@ -53,6 +56,7 @@ export function useDscSigner(): UseDscSignerReturn {
   const detect = useCallback(async () => {
     setStatus('detecting');
     setError(null);
+    setWarning(null);
     const found = await detectHelper();
     if (!found) {
       setErr('helper_not_found', 'No DSC helper detected on this computer. Please install emBridge or the BridgeIt DSC Helper.');
@@ -66,13 +70,36 @@ export function useDscSigner(): UseDscSignerReturn {
     if (!helper) { await detect(); return; }
     setStatus('enumerating');
     setError(null);
+    setWarning(null);
     try {
       const all = await listCertificates(helper);
-      const signing = filterSigningCerts(all);
-      if (signing.length === 0) {
-        setErr('no_certificates', 'No Class 3 signing certificates found on the token. Ensure the token is plugged in and drivers are installed.');
+      if (all.length === 0) {
+        setErr(
+          'no_certificates',
+          'No certificates were returned by the helper. Ensure the token is inserted, unlocked, and the vendor PKCS#11 driver is installed.',
+        );
         return;
       }
+      const signing = filterSigningCerts(all);
+      if (signing.length === 0) {
+        setErr(
+          'no_certificates',
+          'Certificates were detected on the token, but none are marked for digital signing. Check certificate key usage in your token utility.',
+        );
+        return;
+      }
+
+      const idealCount = signing.filter(hasIdealClass3Profile).length;
+      if (idealCount === 0) {
+        setWarning(
+          'Certificates were detected and can be used for signing, but none advertise nonRepudiation/contentCommitment. This is usually a token profile quirk.',
+        );
+      } else if (idealCount < signing.length) {
+        setWarning(
+          'Some detected certificates do not advertise full Class 3 key-usage flags. Prefer a certificate that includes nonRepudiation/contentCommitment when available.',
+        );
+      }
+
       setCerts(signing);
       setStatus('idle');
     } catch (e) {
@@ -195,9 +222,10 @@ export function useDscSigner(): UseDscSignerReturn {
     abortRef.current?.abort();
     setStatus('idle');
     setError(null);
+    setWarning(null);
     setCerts([]);
     setChosenCert(null);
   }, []);
 
-  return { status, error, helper, certs, chosenCert, detect, enumerate, chooseCert, sign, reset };
+  return { status, error, helper, certs, chosenCert, warning, detect, enumerate, chooseCert, sign, reset };
 }

@@ -83,11 +83,20 @@ export async function listCertificates(helper: HelperInfo): Promise<DscCertifica
 export function filterSigningCerts(certs: DscCertificate[]): DscCertificate[] {
   return certs.filter(c => {
     const ku = c.keyUsage.map(k => k.toLowerCase());
-    return (
-      ku.some(k => k.includes('digitalsignature') || k.includes('digital signature')) &&
-      ku.some(k => k.includes('nonrepudiation') || k.includes('non repudiation') || k.includes('content commitment'))
-    );
+    // On several token stacks (especially on macOS drivers), nonRepudiation /
+    // contentCommitment may be absent even when the certificate can sign.
+    // Keep digitalSignature as the hard requirement and treat the rest as advisory.
+    return ku.some(k => k.includes('digitalsignature') || k.includes('digital signature'));
   });
+}
+
+export function hasIdealClass3Profile(cert: DscCertificate): boolean {
+  const ku = cert.keyUsage.map(k => k.toLowerCase());
+  const hasDigitalSignature = ku.some(k => k.includes('digitalsignature') || k.includes('digital signature'));
+  const hasNonRepudiation = ku.some(
+    k => k.includes('nonrepudiation') || k.includes('non repudiation') || k.includes('content commitment'),
+  );
+  return hasDigitalSignature && hasNonRepudiation;
 }
 
 export interface SignHashParams {

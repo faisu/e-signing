@@ -42,6 +42,7 @@ export default function DscSigningPanel({
     helper,
     certs,
     chosenCert,
+    warning,
     detect,
     enumerate,
     chooseCert,
@@ -144,6 +145,13 @@ export default function DscSigningPanel({
 
       {/* Status */}
       <StatusBadge status={status} error={error} />
+
+      {warning && (
+        <div className="rounded-md bg-amber-50 border border-amber-300 px-4 py-3 text-sm text-amber-900">
+          <span className="font-semibold">Note: </span>
+          {warning}
+        </div>
+      )}
 
       {/* Download */}
       {status === 'done' && (

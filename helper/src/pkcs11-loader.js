@@ -31,6 +31,9 @@ const KNOWN_LIBS = {
     'C:\\Program Files\\OpenSC Project\\OpenSC\\pkcs11\\opensc-pkcs11.dll',
   ],
   darwin: [
+    '/usr/local/lib/opensc-pkcs11.dylib',
+    '/usr/lib/opensc-pkcs11.dylib',
+    // Keep .so for environments using custom symlinks.
     '/usr/local/lib/opensc-pkcs11.so',
     '/usr/lib/opensc-pkcs11.so',
     // Safenet eToken

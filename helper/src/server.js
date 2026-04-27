@@ -84,12 +84,14 @@ function ensureCert() {
 // ── PKCS#11 init ───────────────────────────────────────────────────────────
 
 let pkcs11 = null;
+let pkcs11Path = null;
 
 function tryLoadPkcs11() {
   if (pkcs11) return;
   const result = loadPkcs11Module(PKCS11_LIB);
   if (result) {
     pkcs11 = result.lib;
+    pkcs11Path = result.path;
     console.log(`[helper] PKCS#11 module ready: ${result.path}`);
   } else {
     console.warn('[helper] No PKCS#11 module found — /certificates will return []');
@@ -167,18 +169,28 @@ app.get('/version', (_req, res) => {
     version: '1.0.0',
     vendor: 'BridgeIt DSC Helper',
     allowedOrigins: ALLOWED_ORIGINS,
+    pkcs11Ready: Boolean(pkcs11),
+    pkcs11Path,
   });
 });
 
 app.get('/certificates', (_req, res) => {
   tryLoadPkcs11();
-  if (!pkcs11) return res.json([]);
+  if (!pkcs11) {
+    console.warn('[helper] /certificates requested but PKCS#11 is not loaded');
+    return res.json([]);
+  }
   try {
     const certs = listCertificates(pkcs11);
+    console.log(`[helper] /certificates returned ${certs.length} certificate(s)`);
     res.json(certs);
   } catch (err) {
     console.error('[helper] listCertificates error:', err);
-    res.status(500).json({ error: String(err) });
+    res.status(500).json({
+      error: String(err),
+      message: 'Failed to read certificates from token. Verify token middleware/driver installation and reconnect token.',
+      pkcs11Path,
+    });
   }
 });
 
