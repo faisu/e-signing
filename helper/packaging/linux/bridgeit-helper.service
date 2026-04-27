@@ -1,0 +1,13 @@
+[Unit]
+Description=BridgeIt DSC Helper
+Documentation=https://github.com/bridgeit/e-signing
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/bridgeit-helper
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=default.target
