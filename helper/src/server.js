@@ -57,7 +57,7 @@ try { persistedConfig = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); } catc
 const ALLOWED_ORIGINS = (
   process.env.ALLOWED_ORIGINS ??
   persistedConfig.allowedOrigins ??
-  'http://localhost:3000,https://localhost:3000,http://localhost:3001'
+  'http://localhost:3000,https://localhost:3000,http://localhost:3001,http://192.168.1.11:3000'
 )
   .split(',')
   .map(s => s.trim());
