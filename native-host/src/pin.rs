@@ -161,8 +161,9 @@ mod windows {
     pub fn prompt(token_label: &str) -> PinResult {
         let caption = to_wide("AutoDCR Bridge");
         let message = to_wide(&format!("Enter PIN for {token_label}"));
+        let target_name = to_wide("AutoDCRBridge");
 
-        let mut info = CREDUI_INFOW {
+        let info = CREDUI_INFOW {
             cbSize: std::mem::size_of::<CREDUI_INFOW>() as u32,
             hwndParent: Default::default(),
             pszMessageText: PCWSTR(message.as_ptr()),
@@ -186,18 +187,18 @@ mod windows {
         // SAFETY: All buffers outlive the call.
         let result = unsafe {
             CredUIPromptForCredentialsW(
-                Some(&mut info),
-                PCWSTR(to_wide("AutoDCRBridge").as_ptr()),
+                Some(&info),
+                PCWSTR(target_name.as_ptr()),
                 None,
                 0,
-                Some(&mut user),
-                Some(&mut pin),
+                &mut user,
+                &mut pin,
                 Some(&mut save),
                 flags,
             )
         };
 
-        match WIN32_ERROR(result) {
+        match result {
             ERROR_SUCCESS => {
                 let len = pin.iter().position(|&c| c == 0).unwrap_or(pin.len());
                 let s = String::from_utf16_lossy(&pin[..len]);
