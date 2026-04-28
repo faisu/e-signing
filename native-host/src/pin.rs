@@ -149,13 +149,13 @@ mod linux {
 #[cfg(target_os = "windows")]
 mod windows {
     use super::{PinError, PinResult};
-    use anyhow::anyhow;
     use ::windows::core::PCWSTR;
     use ::windows::Win32::Foundation::{ERROR_CANCELLED, ERROR_SUCCESS, WIN32_ERROR};
     use ::windows::Win32::Security::Credentials::{
         CredUIPromptForCredentialsW, CREDUI_FLAGS, CREDUI_FLAGS_DO_NOT_PERSIST,
         CREDUI_FLAGS_GENERIC_CREDENTIALS, CREDUI_FLAGS_KEEP_USERNAME, CREDUI_INFOW,
     };
+    use anyhow::anyhow;
 
     fn to_wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
