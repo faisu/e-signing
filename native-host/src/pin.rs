@@ -148,10 +148,11 @@ mod linux {
 
 #[cfg(target_os = "windows")]
 mod windows {
-    use super::*;
-    use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{ERROR_CANCELLED, ERROR_SUCCESS, WIN32_ERROR};
-    use windows::Win32::Security::Credentials::{
+    use super::{PinError, PinResult};
+    use anyhow::anyhow;
+    use ::windows::core::PCWSTR;
+    use ::windows::Win32::Foundation::{ERROR_CANCELLED, ERROR_SUCCESS, WIN32_ERROR};
+    use ::windows::Win32::Security::Credentials::{
         CredUIPromptForCredentialsW, CREDUI_FLAGS, CREDUI_FLAGS_DO_NOT_PERSIST,
         CREDUI_FLAGS_GENERIC_CREDENTIALS, CREDUI_FLAGS_KEEP_USERNAME, CREDUI_INFOW,
     };
