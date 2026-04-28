@@ -1,0 +1,31 @@
+{
+  "name": "autodcr-chrome-native-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MV3 extension bridge for native PKCS#11 host messaging",
+  "type": "module",
+  "scripts": {
+    "dev": "vite build --watch",
+    "build": "vite build",
+    "build:release": "bash ./scripts/build-release.sh",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --check .",
+    "format:write": "prettier --write .",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@crxjs/vite-plugin": "^2.1.0-beta.26",
+    "@eslint/js": "^9.39.4",
+    "@types/chrome": "^0.0.294",
+    "@typescript-eslint/eslint-plugin": "^8.31.1",
+    "@typescript-eslint/parser": "^8.31.1",
+    "eslint": "^9.25.1",
+    "eslint-config-prettier": "^10.1.2",
+    "prettier": "^3.5.3",
+    "typescript": "^5.8.3",
+    "typescript-eslint": "^8.59.1",
+    "vite": "^5.4.19",
+    "vitest": "^2.1.9"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "name": "com.example.autodcr.signer",
+  "description": "AutoDCR signing bridge",
+  "path": "<ABSOLUTE_PATH_TO_LAUNCHER>",
+  "type": "stdio",
+  "allowed_origins": ["chrome-extension://<EXTENSION_ID_PLACEHOLDER>/"]
+}

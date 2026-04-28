@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.DS_Store
+native-host/node_modules/
+native-host/dist/
+release
