@@ -8,8 +8,6 @@
 
 #![allow(dead_code)]
 
-use anyhow::anyhow;
-
 #[derive(Debug, thiserror::Error)]
 pub enum PinError {
     #[error("user cancelled the PIN prompt")]
@@ -59,7 +57,7 @@ return text returned of d"#,
             .arg("-e")
             .arg(&script)
             .output()
-            .map_err(|e| PinError::Other(anyhow!("osascript spawn: {e}")))?;
+            .map_err(|e| PinError::Other(anyhow::anyhow!("osascript spawn: {e}")))?;
 
         if !output.status.success() {
             // osascript exits non-zero when the user clicks Cancel.
@@ -107,12 +105,12 @@ mod linux {
         if let Some(stdin) = child.stdin.as_mut() {
             stdin
                 .write_all(prompt.as_bytes())
-                .map_err(|e| PinError::Other(anyhow!("pinentry write: {e}")))?;
+                .map_err(|e| PinError::Other(anyhow::anyhow!("pinentry write: {e}")))?;
         }
 
         let out = child
             .wait_with_output()
-            .map_err(|e| PinError::Other(anyhow!("pinentry wait: {e}")))?;
+            .map_err(|e| PinError::Other(anyhow::anyhow!("pinentry wait: {e}")))?;
         let text = String::from_utf8_lossy(&out.stdout);
 
         for line in text.lines() {
@@ -155,7 +153,6 @@ mod windows {
         CredUIPromptForCredentialsW, CREDUI_FLAGS, CREDUI_FLAGS_DO_NOT_PERSIST,
         CREDUI_FLAGS_GENERIC_CREDENTIALS, CREDUI_FLAGS_KEEP_USERNAME, CREDUI_INFOW,
     };
-    use anyhow::anyhow;
 
     fn to_wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -211,7 +208,7 @@ mod windows {
                 }
             }
             ERROR_CANCELLED => Err(PinError::Cancelled),
-            err => Err(PinError::Other(anyhow!("CredUI failed: {:?}", err))),
+            err => Err(PinError::Other(anyhow::anyhow!("CredUI failed: {:?}", err))),
         }
     }
 }
