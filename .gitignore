@@ -1,6 +1,14 @@
 node_modules/
 dist/
 .DS_Store
-native-host/node_modules/
-native-host/dist/
-release
+release/
+
+# Rust native host
+native-host/target/
+native-host/Cargo.lock.bak
+
+# Installer build artefacts
+installer/**/payload/
+installer/**/dist/
+installer/**/build/
+artifacts/

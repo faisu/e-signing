@@ -1,4 +1,18 @@
 #!/usr/bin/env bash
+#
+# Local release build. Produces:
+#
+#   release/<basename>/extension.zip
+#   release/<basename>/AutoDCR-Bridge-<version>.pkg          (macOS only, if pkgbuild is available)
+#   release/<basename>/checksums.txt
+#
+# Cross-OS installers (.msi, .deb, .rpm) are produced by the GitHub Actions
+# release workflow at .github/workflows/release.yml. This script only handles
+# what's reproducible from a developer machine.
+#
+# Required env (only when building the .pkg):
+#   AUTODCR_EXTENSION_ID   Chrome extension id baked into allowed_origins.
+
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -10,39 +24,44 @@ RELEASE_ROOT="${ROOT_DIR}/release"
 RELEASE_BASENAME="autodcr-bridge-v${APP_VERSION}-${STAMP}"
 RELEASE_DIR="${RELEASE_ROOT}/${RELEASE_BASENAME}"
 LATEST_DIR="${RELEASE_ROOT}/latest"
-ZIP_PATH="${RELEASE_ROOT}/${RELEASE_BASENAME}.zip"
 
 echo "==> Building Chrome extension"
 npm run build
 
-echo "==> Building native host"
-npm --prefix native-host run build
+echo "==> Building native host (release)"
+(cd native-host && cargo build --release)
 
-echo "==> Preparing release directories"
-mkdir -p "${RELEASE_DIR}/extension" "${RELEASE_DIR}/native-host"
+mkdir -p "${RELEASE_DIR}"
 
-cp -R dist "${RELEASE_DIR}/extension/"
-cp README.md "${RELEASE_DIR}/"
-cp -R docs "${RELEASE_DIR}/"
+echo "==> Packaging extension"
+(cd dist && zip -rq "${RELEASE_DIR}/extension.zip" .)
 
-cp native-host/README.md "${RELEASE_DIR}/native-host/"
-cp native-host/package.json "${RELEASE_DIR}/native-host/"
-cp -R native-host/dist "${RELEASE_DIR}/native-host/"
-cp -R native-host/manifests "${RELEASE_DIR}/native-host/"
-cp -R native-host/launchers "${RELEASE_DIR}/native-host/"
+if [[ "$(uname -s)" == "Darwin" ]] && command -v pkgbuild >/dev/null; then
+  if [[ -z "${AUTODCR_EXTENSION_ID:-}" ]]; then
+    echo "Skipping macOS .pkg build: AUTODCR_EXTENSION_ID not set"
+  else
+    echo "==> Building macOS .pkg (current arch only; CI produces universal)"
+    PAYLOAD_DIR="${ROOT_DIR}/installer/macos/payload"
+    rm -rf "${PAYLOAD_DIR}"
+    mkdir -p "${PAYLOAD_DIR}"
+    cp "native-host/target/release/autodcr-bridge" "${PAYLOAD_DIR}/autodcr-bridge"
+
+    AUTODCR_VERSION="${APP_VERSION}" bash installer/macos/build-pkg.sh
+    cp installer/macos/dist/AutoDCR-Bridge-${APP_VERSION}.pkg "${RELEASE_DIR}/"
+
+    rm -rf "${PAYLOAD_DIR}" "${ROOT_DIR}/installer/macos/dist"
+  fi
+fi
+
+echo "==> Computing checksums"
+(cd "${RELEASE_DIR}" && shasum -a 256 * > checksums.txt)
 
 echo "==> Updating latest release copy"
 rm -rf "${LATEST_DIR}"
 cp -R "${RELEASE_DIR}" "${LATEST_DIR}"
 
-echo "==> Creating zip artifact"
-(
-  cd "${RELEASE_ROOT}"
-  zip -rq "$(basename "${ZIP_PATH}")" "$(basename "${RELEASE_DIR}")"
-)
-
 echo
 echo "Release created:"
 echo "  Folder: ${RELEASE_DIR}"
 echo "  Latest: ${LATEST_DIR}"
-echo "  Zip:    ${ZIP_PATH}"
+ls -la "${RELEASE_DIR}"

@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  WiX v4 source for the AutoDCR Bridge MSI.
+
+  Per-user install (no admin). Lays down:
+    %LOCALAPPDATA%\AutoDCR\bridge\autodcr-bridge.exe
+    %LOCALAPPDATA%\AutoDCR\bridge\com.example.autodcr.signer.json
+  And writes HKCU registry entries for each Chromium-family browser pointing
+  at the manifest path, which is what Chrome's native messaging host loader
+  reads.
+
+  Build with:
+    wix build autodcr-bridge.wxs -d Version=$Env:AUTODCR_VERSION ^
+              -d ManifestSource=...path... ^
+              -d BinarySource=...path... ^
+              -arch x64 -out dist\AutoDCR-Bridge-$Env:AUTODCR_VERSION.msi
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+      Name="AutoDCR Bridge"
+      Manufacturer="AutoDCR"
+      Version="$(var.Version)"
+      UpgradeCode="9C7A1B12-7C13-4AC3-9F4F-3B7A1F2A0E11"
+      Scope="perUser"
+      InstallerVersion="500">
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <MajorUpgrade
+        DowngradeErrorMessage="A newer version of [ProductName] is already installed."
+        AllowSameVersionUpgrades="yes" />
+
+    <Property Id="ARPNOREPAIR" Value="yes" />
+    <Property Id="ARPNOMODIFY" Value="yes" />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="AUTODCR_ROOT" Name="AutoDCR">
+        <Directory Id="AUTODCR_BRIDGE" Name="bridge">
+          <Component Id="MainBinary" Guid="6D2C9DF8-2A5B-4E61-9F2C-6C76C3E3F101">
+            <File Id="AutoDcrBridgeExe"
+                  Source="$(var.BinarySource)"
+                  Name="autodcr-bridge.exe"
+                  KeyPath="yes" />
+          </Component>
+          <Component Id="HostManifest" Guid="9D8B2EE4-2F4D-49EC-B1E2-2A3F6F82B2A5">
+            <File Id="HostManifestJson"
+                  Source="$(var.ManifestSource)"
+                  Name="com.example.autodcr.signer.json"
+                  KeyPath="yes" />
+          </Component>
+          <Component Id="ChromeRegistration" Guid="A2D9EB45-6E97-4CCB-A7B8-9A2F8B5C0E22">
+            <RegistryValue
+                Root="HKCU"
+                Key="Software\Google\Chrome\NativeMessagingHosts\com.example.autodcr.signer"
+                Type="string"
+                Value="[AUTODCR_BRIDGE]com.example.autodcr.signer.json"
+                KeyPath="yes" />
+          </Component>
+          <Component Id="EdgeRegistration" Guid="C16A5D2A-2E62-4A4B-9F3D-8B7F1B9A91E2">
+            <RegistryValue
+                Root="HKCU"
+                Key="Software\Microsoft\Edge\NativeMessagingHosts\com.example.autodcr.signer"
+                Type="string"
+                Value="[AUTODCR_BRIDGE]com.example.autodcr.signer.json"
+                KeyPath="yes" />
+          </Component>
+          <Component Id="BraveRegistration" Guid="3F2E5D7C-9A1B-4C2D-B7E8-2C4D5E6F7081">
+            <RegistryValue
+                Root="HKCU"
+                Key="Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\com.example.autodcr.signer"
+                Type="string"
+                Value="[AUTODCR_BRIDGE]com.example.autodcr.signer.json"
+                KeyPath="yes" />
+          </Component>
+          <Component Id="ChromiumRegistration" Guid="55A9BC7A-1D6B-4B8E-9A2F-3C4D5E6F7082">
+            <RegistryValue
+                Root="HKCU"
+                Key="Software\Chromium\NativeMessagingHosts\com.example.autodcr.signer"
+                Type="string"
+                Value="[AUTODCR_BRIDGE]com.example.autodcr.signer.json"
+                KeyPath="yes" />
+          </Component>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="AutoDCR Bridge" Level="1" Display="expand">
+      <ComponentRef Id="MainBinary" />
+      <ComponentRef Id="HostManifest" />
+      <ComponentRef Id="ChromeRegistration" />
+      <ComponentRef Id="EdgeRegistration" />
+      <ComponentRef Id="BraveRegistration" />
+      <ComponentRef Id="ChromiumRegistration" />
+    </Feature>
+  </Package>
+</Wix>

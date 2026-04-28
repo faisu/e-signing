@@ -3,14 +3,15 @@
 This repository provides:
 
 - A Chrome MV3 extension that bridges a trusted web origin to a native messaging host.
-- A reference native host (Node.js) that implements Chrome native messaging framing and stub token commands.
+- A native host written in Rust that implements Chrome native messaging framing and PKCS#11-backed signing. Single statically-linked binary (~1 MB) — no Node, npm, or Xcode needed on client machines.
+- OS-native installers (`.pkg` / `.msi` / `.deb` / `.rpm`) that drop the manifest and registry/keychain entries automatically.
 - Shared protocol/types for consistent request and response envelopes.
 
 ## What this repo does not include
 
-- PKCS#11 library loading in extension code.
+- PKCS#11 library loading in extension code (kept in the native host by design).
 - Full Next.js app or server-side PDF signing pipeline.
-- Production token UX and PIN prompts (stub-only in host for now).
+- Code signing / notarization (hooks are in place; supply your certs to enable).
 
 ## Architecture
 
@@ -21,49 +22,32 @@ This repository provides:
 
 ## Quick start
 
-### 1) Install dependencies
+### End users
+
+Download the installer for your OS from the latest GitHub release and double-click. See [docs/NATIVE_HOST_INSTALL.md](docs/NATIVE_HOST_INSTALL.md).
+
+### Developers
 
 ```bash
+# Extension
 npm install
-cd native-host && npm install
-```
+npm run build       # outputs to dist/
 
-### 2) Build native host
-
-```bash
+# Native host (requires Rust toolchain)
 cd native-host
-npm run build
+cargo build --release
+cargo test --all-targets
 ```
 
-### 3) Configure native messaging host manifest
+Wire a locally built host to a locally loaded extension using the steps in [docs/NATIVE_HOST_DEV.md](docs/NATIVE_HOST_DEV.md).
 
-1. Copy `native-host/manifests/com.example.autodcr.signer.json` to your platform-specific Chrome NativeMessagingHosts directory.
-2. Replace:
-   - `<ABSOLUTE_PATH_TO_LAUNCHER>` with the absolute path to your launcher script.
-   - `<EXTENSION_ID_PLACEHOLDER>` with your installed extension id.
-3. Ensure launchers are executable on macOS/Linux:
+### Cut a release
 
 ```bash
-chmod +x native-host/launchers/macos.sh native-host/launchers/linux.sh
+AUTODCR_EXTENSION_ID=<your-extension-id> npm run build:release
 ```
 
-See `docs/NATIVE_HOST_INSTALL.md` for exact OS paths and Windows registry steps.
-
-### 4) Build/load extension
-
-```bash
-npm run build
-```
-
-Then open `chrome://extensions`, enable Developer mode, and load unpacked extension from `dist/`.
-
-### 5) Development mode
-
-```bash
-npm run dev
-```
-
-This watches extension assets; reload extension in Chrome after rebuilds.
+Produces `release/<basename>/extension.zip` and (on macOS) `AutoDCR-Bridge-<version>.pkg` plus `checksums.txt`. The full multi-OS release pipeline (`.pkg` + `.msi` + `.deb` + `.rpm` + checksums) is at `.github/workflows/release.yml` and runs on tag push.
 
 ## Protocol summary
 
@@ -111,7 +95,7 @@ Implemented commands:
 - Content script ignores unknown `source`, non-window events, and disallowed origins.
 - Service worker is the only extension context that calls `connectNative`.
 - No PIN logging. PIN must be handled inside native host UX in production implementation.
-- No PKCS#11 dependencies in extension bundle.
+- No PKCS#11 dependencies in extension bundle (vendor module loaded by the native host at runtime).
 
 ## Web app integration
 

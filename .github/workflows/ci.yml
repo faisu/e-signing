@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native-host
+      - name: cargo fmt
+        working-directory: native-host
+        run: cargo fmt --all -- --check
+      - name: cargo clippy
+        working-directory: native-host
+        run: cargo clippy --all-targets -- -D warnings
+      - name: cargo test
+        working-directory: native-host
+        run: cargo test --all-targets
+
+      - name: Smoke test
+        if: matrix.os == 'macos-latest' || matrix.os == 'ubuntu-22.04'
+        run: bash scripts/smoke-test.sh
+
+  extension:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run build
