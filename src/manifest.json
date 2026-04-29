@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "AutoDCR Native Signing Bridge",
   "description": "Trusted bridge between the web app and native token signer host.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "permissions": ["nativeMessaging"],
   "background": {
     "service_worker": "src/background/service-worker.ts",
@@ -10,7 +10,7 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://app.example.com/*", "http://localhost:3000/*"],
+      "matches": ["http://192.168.1.3/*", "http://localhost:3000/*", "https://autodcr.vercel.app/*"],
       "js": ["src/content/content.ts"],
       "run_at": "document_idle"
     }
