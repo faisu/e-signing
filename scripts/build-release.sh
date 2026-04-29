@@ -3,6 +3,9 @@
 # Local release build. Produces:
 #
 #   release/<basename>/extension.zip
+#   release/<basename>/autodcr-bridge-macos-arm64             (macOS only)
+#   release/<basename>/autodcr-bridge-macos-x64               (macOS only)
+#   release/<basename>/autodcr-bridge-macos-universal         (macOS only)
 #   release/<basename>/AutoDCR-Bridge-<version>.pkg          (macOS only, if pkgbuild is available)
 #   release/<basename>/checksums.txt
 #
@@ -28,23 +31,43 @@ LATEST_DIR="${RELEASE_ROOT}/latest"
 echo "==> Building Chrome extension"
 npm run build
 
-echo "==> Building native host (release)"
-(cd native-host && cargo build --release)
-
 mkdir -p "${RELEASE_DIR}"
 
 echo "==> Packaging extension"
 (cd dist && zip -rq "${RELEASE_DIR}/extension.zip" .)
 
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  echo "==> Ensuring Rust targets are installed"
+  rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+  echo "==> Building native host (release) for macOS arm64 + x64"
+  (cd native-host && cargo build --release --target aarch64-apple-darwin)
+  (cd native-host && cargo build --release --target x86_64-apple-darwin)
+
+  cp "native-host/target/aarch64-apple-darwin/release/autodcr-bridge" \
+    "${RELEASE_DIR}/autodcr-bridge-macos-arm64"
+  cp "native-host/target/x86_64-apple-darwin/release/autodcr-bridge" \
+    "${RELEASE_DIR}/autodcr-bridge-macos-x64"
+
+  echo "==> Creating universal macOS native host binary"
+  lipo -create \
+    "${RELEASE_DIR}/autodcr-bridge-macos-arm64" \
+    "${RELEASE_DIR}/autodcr-bridge-macos-x64" \
+    -output "${RELEASE_DIR}/autodcr-bridge-macos-universal"
+else
+  echo "==> Building native host (release)"
+  (cd native-host && cargo build --release)
+fi
+
 if [[ "$(uname -s)" == "Darwin" ]] && command -v pkgbuild >/dev/null; then
   if [[ -z "${AUTODCR_EXTENSION_ID:-}" ]]; then
     echo "Skipping macOS .pkg build: AUTODCR_EXTENSION_ID not set"
   else
-    echo "==> Building macOS .pkg (current arch only; CI produces universal)"
+    echo "==> Building macOS .pkg from universal local binary"
     PAYLOAD_DIR="${ROOT_DIR}/installer/macos/payload"
     rm -rf "${PAYLOAD_DIR}"
     mkdir -p "${PAYLOAD_DIR}"
-    cp "native-host/target/release/autodcr-bridge" "${PAYLOAD_DIR}/autodcr-bridge"
+    cp "${RELEASE_DIR}/autodcr-bridge-macos-universal" "${PAYLOAD_DIR}/autodcr-bridge"
 
     AUTODCR_VERSION="${APP_VERSION}" bash installer/macos/build-pkg.sh
     cp installer/macos/dist/AutoDCR-Bridge-${APP_VERSION}.pkg "${RELEASE_DIR}/"
