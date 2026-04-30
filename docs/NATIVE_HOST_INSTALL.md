@@ -67,11 +67,22 @@ pkcs11_module = "/absolute/path/to/your/vendor.dylib"
 prompt_pin = true
 ```
 
+### PING and token detection
+
+- `PING` returns `ok: true` when the native host process is reachable (connector installed).
+- `result.tokenPresent` is computed with a hybrid probe:
+  - `true` immediately when PKCS#11 can list at least one slot with a present token (same source of truth as `LIST_SLOTS`).
+  - if PKCS#11 is unavailable or finds no token, the host runs a USB fallback heuristic (known vendor IDs / smart-card USB class) and may still return `true`.
+  - if neither probe matches, it returns `false`.
+- USB fallback indicates likely hardware presence only. Certificate listing and signing still require a working PKCS#11 module/session.
+
+A mounted USB volume (for example a **HyperPKI_** disk on the desktop) only shows that the device exposes storage or installer media; it does **not** guarantee the bridge has loaded a PKCS#11 driver. Brands such as HyperPKI are often not in the built-in auto-detect list: set `pkcs11_module` to the absolute path of the vendor `.dylib` from that manufacturer’s macOS documentation.
+
 ## Verify
 
 1. Plug in your token.
 2. Load the AutoDCR extension and open an allowed origin.
-3. The page sends a `PING`; you should see `ok: true` and `hostVersion`.
+3. The page sends a `PING`; you should see `ok: true` and `hostVersion`. When the token and PKCS#11 module are correctly configured, `tokenPresent` should be `true`.
 
 ## Logs
 

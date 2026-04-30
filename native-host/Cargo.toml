@@ -28,6 +28,7 @@ hex = "0.4"
 
 # PKCS#11 client
 cryptoki = "0.7"
+rusb = { version = "0.9", features = ["vendored"] }
 
 # Certificate parsing for LIST_CERTS metadata
 x509-parser = "0.16"

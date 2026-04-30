@@ -107,7 +107,7 @@ Implemented commands:
 ## Testing checklist
 
 - `npm test` for framing and origin allowlist tests.
-- Confirm `PING` returns host version.
+- Confirm `PING` returns host version and that `tokenPresent` matches PKCS#11 (true when a token slot is visible; false if only the host is installed).
 - Send chunked `SIGN_PDF_*` flow and verify response roundtrip.
 - Kill native host and verify extension returns `NATIVE_DISCONNECTED`.
 

@@ -18,6 +18,7 @@ use crate::protocol::{
     error_code as err, HostCmd, HostEnvelope, HostResponse, SignPdfChunkPayload, SignPdfEndPayload,
     SignPdfStartPayload, MAX_CHUNK_BYTES,
 };
+use crate::token_detection;
 
 const HOST_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -47,6 +48,7 @@ impl State {
     fn pkcs11_or_load(&self) -> anyhow::Result<()> {
         let mut guard = self.pkcs11.lock().unwrap();
         if guard.is_some() {
+            tracing::debug!("pkcs11 client already initialized");
             return Ok(());
         }
         let module = self
@@ -57,6 +59,7 @@ impl State {
             .context("no PKCS#11 module configured and no vendor default detected")?;
         tracing::info!(module = %module.display(), "loading PKCS#11 module");
         let client = Pkcs11Client::load(&module)?;
+        tracing::info!("PKCS#11 module loaded successfully");
         *guard = Some(client);
         Ok(())
     }
@@ -76,19 +79,38 @@ impl State {
 
 pub fn handle(state: &State, env: HostEnvelope) -> Vec<HostResponse> {
     let id = env.id.clone();
+    tracing::debug!(request_id = %id, cmd = ?env.cmd, "dispatching command");
     match env.cmd {
-        HostCmd::Ping => vec![HostResponse::success(
-            id,
-            json!({
-                "hostVersion": HOST_VERSION,
-                "tokenPresent": false,
-                "protocolVersion": crate::protocol::PROTOCOL_VERSION,
-            }),
-        )],
+        HostCmd::Ping => {
+            let token_present = token_detection::hybrid_token_present(
+                || state.with_pkcs11(|c| c.list_slots().map(|slots| !slots.is_empty())),
+                token_detection::usb_token_hint_present,
+            );
+            tracing::info!(
+                request_id = %id,
+                token_present,
+                "PING evaluated token presence"
+            );
+            vec![HostResponse::success(
+                id,
+                json!({
+                    "hostVersion": HOST_VERSION,
+                    "tokenPresent": token_present,
+                    "protocolVersion": crate::protocol::PROTOCOL_VERSION,
+                }),
+            )]
+        }
         HostCmd::ListSlots => match state.with_pkcs11(|c| c.list_slots()) {
-            Ok(slots) => vec![HostResponse::success(id, json!({ "slots": slots }))],
+            Ok(slots) => {
+                tracing::info!(
+                    request_id = %id,
+                    slot_count = slots.len(),
+                    "LIST_SLOTS succeeded"
+                );
+                vec![HostResponse::success(id, json!({ "slots": slots }))]
+            }
             Err(e) => {
-                tracing::warn!("LIST_SLOTS failed: {e:?}");
+                tracing::warn!(request_id = %id, "LIST_SLOTS failed: {e:?}");
                 vec![HostResponse::failure(
                     id,
                     err::PKCS11_INIT_FAILED,
@@ -100,6 +122,7 @@ pub fn handle(state: &State, env: HostEnvelope) -> Vec<HostResponse> {
             let slot_id = match env.payload.get("slotId").and_then(Value::as_u64) {
                 Some(s) => s,
                 None => {
+                    tracing::warn!(request_id = %id, "LIST_CERTS missing payload.slotId");
                     return vec![HostResponse::failure(
                         id,
                         err::INVALID_PAYLOAD,
@@ -107,10 +130,19 @@ pub fn handle(state: &State, env: HostEnvelope) -> Vec<HostResponse> {
                     )]
                 }
             };
+            tracing::debug!(request_id = %id, slot_id, "LIST_CERTS requested");
             match state.with_pkcs11(|c| c.list_certs(slot_id)) {
-                Ok(certs) => vec![HostResponse::success(id, json!({ "certs": certs }))],
+                Ok(certs) => {
+                    tracing::info!(
+                        request_id = %id,
+                        slot_id,
+                        cert_count = certs.len(),
+                        "LIST_CERTS succeeded"
+                    );
+                    vec![HostResponse::success(id, json!({ "certs": certs }))]
+                }
                 Err(e) => {
-                    tracing::warn!("LIST_CERTS failed: {e:?}");
+                    tracing::warn!(request_id = %id, slot_id, "LIST_CERTS failed: {e:?}");
                     vec![HostResponse::failure(
                         id,
                         err::CERT_NOT_FOUND,
@@ -121,15 +153,24 @@ pub fn handle(state: &State, env: HostEnvelope) -> Vec<HostResponse> {
         }
         HostCmd::SignPdfStart => match decode::<SignPdfStartPayload>(&env.payload) {
             Ok(payload) => vec![handle_start(state, &id, payload)],
-            Err(e) => vec![HostResponse::failure(id, err::INVALID_PAYLOAD, e)],
+            Err(e) => {
+                tracing::warn!(request_id = %id, error = %e, "SIGN_PDF_START payload decode failed");
+                vec![HostResponse::failure(id, err::INVALID_PAYLOAD, e)]
+            }
         },
         HostCmd::SignPdfChunk => match decode::<SignPdfChunkPayload>(&env.payload) {
             Ok(payload) => vec![handle_chunk(state, &id, payload)],
-            Err(e) => vec![HostResponse::failure(id, err::INVALID_PAYLOAD, e)],
+            Err(e) => {
+                tracing::warn!(request_id = %id, error = %e, "SIGN_PDF_CHUNK payload decode failed");
+                vec![HostResponse::failure(id, err::INVALID_PAYLOAD, e)]
+            }
         },
         HostCmd::SignPdfEnd => match decode::<SignPdfEndPayload>(&env.payload) {
             Ok(payload) => handle_end(state, &id, payload),
-            Err(e) => vec![HostResponse::failure(id, err::INVALID_PAYLOAD, e)],
+            Err(e) => {
+                tracing::warn!(request_id = %id, error = %e, "SIGN_PDF_END payload decode failed");
+                vec![HostResponse::failure(id, err::INVALID_PAYLOAD, e)]
+            }
         },
     }
 }
@@ -140,12 +181,27 @@ fn decode<T: serde::de::DeserializeOwned>(value: &Value) -> Result<T, String> {
 
 fn handle_start(state: &State, id: &str, payload: SignPdfStartPayload) -> HostResponse {
     if payload.job_id.is_empty() || payload.total_chunks == 0 {
+        tracing::warn!(
+            request_id = %id,
+            job_id = %payload.job_id,
+            total_chunks = payload.total_chunks,
+            "SIGN_PDF_START rejected due to invalid payload"
+        );
         return HostResponse::failure(
             id,
             err::INVALID_PAYLOAD,
             "SIGN_PDF_START requires jobId and totalChunks > 0.",
         );
     }
+    tracing::info!(
+        request_id = %id,
+        job_id = %payload.job_id,
+        total_chunks = payload.total_chunks,
+        slot_id = ?payload.slot_id,
+        cert_id_present = payload.cert_id.is_some(),
+        cert_id_len = payload.cert_id.as_ref().map(|v| v.len()).unwrap_or_default(),
+        "SIGN_PDF_START accepted"
+    );
     let job = SignJob {
         total_chunks: payload.total_chunks,
         chunks: vec![String::new(); payload.total_chunks as usize],
@@ -157,6 +213,8 @@ fn handle_start(state: &State, id: &str, payload: SignPdfStartPayload) -> HostRe
         .lock()
         .unwrap()
         .insert(payload.job_id.clone(), job);
+    let active_jobs = state.sign_jobs.lock().unwrap().len();
+    tracing::debug!(request_id = %id, active_jobs, "sign job registered");
 
     HostResponse::success(id, json!({ "accepted": true, "jobId": payload.job_id }))
 }
@@ -166,6 +224,12 @@ fn handle_chunk(state: &State, id: &str, payload: SignPdfChunkPayload) -> HostRe
     let job = match jobs.get_mut(&payload.job_id) {
         Some(j) => j,
         None => {
+            tracing::warn!(
+                request_id = %id,
+                job_id = %payload.job_id,
+                index = payload.index,
+                "SIGN_PDF_CHUNK received for unknown job"
+            );
             return HostResponse::failure(
                 id,
                 err::UNKNOWN_JOB,
@@ -174,8 +238,23 @@ fn handle_chunk(state: &State, id: &str, payload: SignPdfChunkPayload) -> HostRe
         }
     };
     if payload.index >= job.total_chunks {
+        tracing::warn!(
+            request_id = %id,
+            job_id = %payload.job_id,
+            index = payload.index,
+            total_chunks = job.total_chunks,
+            "SIGN_PDF_CHUNK index out of range"
+        );
         return HostResponse::failure(id, err::INVALID_CHUNK_INDEX, "Chunk index is out of range.");
     }
+    tracing::debug!(
+        request_id = %id,
+        job_id = %payload.job_id,
+        index = payload.index,
+        total_chunks = job.total_chunks,
+        chunk_base64_len = payload.chunk_base64.len(),
+        "SIGN_PDF_CHUNK accepted"
+    );
     job.chunks[payload.index as usize] = payload.chunk_base64;
     HostResponse::success(
         id,
@@ -188,8 +267,14 @@ fn handle_chunk(state: &State, id: &str, payload: SignPdfChunkPayload) -> HostRe
 }
 
 fn handle_end(state: &State, id: &str, payload: SignPdfEndPayload) -> Vec<HostResponse> {
+    tracing::info!(request_id = %id, job_id = %payload.job_id, "SIGN_PDF_END received");
     let job = state.sign_jobs.lock().unwrap().remove(&payload.job_id);
     let Some(job) = job else {
+        tracing::warn!(
+            request_id = %id,
+            job_id = %payload.job_id,
+            "SIGN_PDF_END received for unknown job"
+        );
         return vec![HostResponse::failure(
             id,
             err::UNKNOWN_JOB,
@@ -198,9 +283,22 @@ fn handle_end(state: &State, id: &str, payload: SignPdfEndPayload) -> Vec<HostRe
     };
 
     let assembled_b64: String = job.chunks.into_iter().collect();
+    tracing::debug!(
+        request_id = %id,
+        job_id = %payload.job_id,
+        total_chunks = job.total_chunks,
+        assembled_base64_len = assembled_b64.len(),
+        "assembled SIGN_PDF_END payload"
+    );
     let pdf_bytes = match base64::engine::general_purpose::STANDARD.decode(&assembled_b64) {
         Ok(b) => b,
         Err(e) => {
+            tracing::warn!(
+                request_id = %id,
+                job_id = %payload.job_id,
+                error = %e,
+                "SIGN_PDF_END base64 decode failed"
+            );
             return vec![HostResponse::failure(
                 id,
                 err::INVALID_PAYLOAD,
@@ -208,10 +306,21 @@ fn handle_end(state: &State, id: &str, payload: SignPdfEndPayload) -> Vec<HostRe
             )]
         }
     };
+    tracing::info!(
+        request_id = %id,
+        job_id = %payload.job_id,
+        pdf_bytes = pdf_bytes.len(),
+        "SIGN_PDF_END decoded PDF payload"
+    );
 
     let signed = match sign_pdf(state, &pdf_bytes, job.slot_id, job.cert_id.as_deref()) {
         Ok(b) => b,
         Err(SignError::Cancelled) => {
+            tracing::info!(
+                request_id = %id,
+                job_id = %payload.job_id,
+                "SIGN_PDF_END cancelled by user"
+            );
             return vec![HostResponse::failure(
                 id,
                 err::PIN_CANCELLED,
@@ -219,6 +328,12 @@ fn handle_end(state: &State, id: &str, payload: SignPdfEndPayload) -> Vec<HostRe
             )];
         }
         Err(SignError::Other(code, msg)) => {
+            tracing::warn!(
+                request_id = %id,
+                job_id = %payload.job_id,
+                error_code = code,
+                "SIGN_PDF_END signing failed: {msg}"
+            );
             return vec![HostResponse::failure(id, code, msg)];
         }
     };
@@ -226,6 +341,14 @@ fn handle_end(state: &State, id: &str, payload: SignPdfEndPayload) -> Vec<HostRe
     let result_b64 = base64::engine::general_purpose::STANDARD.encode(&signed);
     let result_chunks = chunk_string(&result_b64, MAX_CHUNK_BYTES);
     let total = result_chunks.len();
+    tracing::info!(
+        request_id = %id,
+        job_id = %payload.job_id,
+        signed_pdf_bytes = signed.len(),
+        result_base64_len = result_b64.len(),
+        total_chunks = total,
+        "SIGN_PDF_END produced signed output"
+    );
 
     let mut responses = Vec::with_capacity(total + 1);
     for (i, chunk) in result_chunks.into_iter().enumerate() {
@@ -265,23 +388,39 @@ fn sign_pdf(
     slot_id: Option<u64>,
     cert_id: Option<&str>,
 ) -> Result<Vec<u8>, SignError> {
+    tracing::debug!(
+        pdf_bytes = pdf_bytes.len(),
+        slot_id = ?slot_id,
+        cert_id_present = cert_id.is_some(),
+        cert_id_len = cert_id.map(str::len).unwrap_or_default(),
+        "sign_pdf started"
+    );
     let slot_id = slot_id.ok_or_else(|| {
         SignError::Other(
             err::INVALID_PAYLOAD,
             "SIGN_PDF_START.slotId is required".into(),
         )
     })?;
+    tracing::debug!(slot_id, "sign_pdf using slot");
     let cert_id = cert_id.ok_or_else(|| {
         SignError::Other(
             err::INVALID_PAYLOAD,
             "SIGN_PDF_START.certId is required".into(),
         )
     })?;
+    tracing::debug!(slot_id, cert_id_len = cert_id.len(), "sign_pdf using certificate id");
 
     let placeholder = pdf::locate_placeholder(pdf_bytes)
         .map_err(|e| SignError::Other(err::PDF_INVALID, e.to_string()))?;
+    tracing::debug!(
+        slot_id,
+        byte_range_start = placeholder.byte_range_start,
+        byte_range_end = placeholder.byte_range_end,
+        "pdf placeholder located"
+    );
 
     let pin = if state.config.prompt_pin {
+        tracing::debug!("prompting user for token PIN");
         match pin::prompt_pin("AutoDCR token") {
             Ok(p) => p,
             Err(pin::PinError::Cancelled) => return Err(SignError::Cancelled),
@@ -293,15 +432,32 @@ fn sign_pdf(
             "prompt_pin disabled in config and no other PIN source is implemented".into(),
         ));
     };
+    tracing::debug!("PIN acquired successfully");
 
     let cert_der = state
         .with_pkcs11(|c| c.cert_der(slot_id, cert_id))
         .map_err(SignError::from)?;
+    tracing::debug!(
+        slot_id,
+        cert_der_bytes = cert_der.len(),
+        "certificate DER loaded from token"
+    );
 
     let byte_range = pdf::compute_byte_range(pdf_bytes.len(), &placeholder);
     let content_digest = pdf::digest_byte_range(pdf_bytes, &byte_range);
+    tracing::debug!(
+        slot_id,
+        byte_range_segments = byte_range.len(),
+        digest_bytes = content_digest.len(),
+        "computed PDF byte range digest"
+    );
 
     let cms_der = pdf::build_cms_signature(&content_digest, &cert_der, &[], |signed_attrs_der| {
+        tracing::debug!(
+            slot_id,
+            signed_attrs_der_bytes = signed_attrs_der.len(),
+            "requesting PKCS#11 signature over signed attributes"
+        );
         state.with_pkcs11(|c| {
             c.sign_digest(
                 slot_id,
@@ -313,11 +469,26 @@ fn sign_pdf(
         })
     })
     .map_err(|e| SignError::Other(err::CMS_BUILD_FAILED, e.to_string()))?;
+    tracing::debug!(slot_id, cms_der_bytes = cms_der.len(), "CMS signature built");
 
     let target_width = placeholder.byte_range_end - placeholder.byte_range_start + 1;
     let rendered_byte_range = pdf::render_byte_range(&byte_range, target_width);
+    tracing::debug!(
+        slot_id,
+        rendered_byte_range_len = rendered_byte_range.len(),
+        target_width,
+        "rendered byte range for PDF splice"
+    );
 
     pdf::splice_signature(pdf_bytes, &placeholder, &rendered_byte_range, &cms_der)
+        .map(|signed_pdf| {
+            tracing::info!(
+                slot_id,
+                output_bytes = signed_pdf.len(),
+                "sign_pdf completed successfully"
+            );
+            signed_pdf
+        })
         .map_err(|e| SignError::Other(err::PDF_INVALID, e.to_string()))
 }
 
@@ -359,6 +530,10 @@ mod tests {
         let result = r[0].result.as_ref().unwrap();
         assert_eq!(result["hostVersion"], HOST_VERSION);
         assert_eq!(result["protocolVersion"], 1);
+        assert!(
+            result["tokenPresent"].is_boolean(),
+            "tokenPresent must be a boolean (true when PKCS#11 sees a token)"
+        );
     }
 
     #[test]

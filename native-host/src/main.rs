@@ -11,6 +11,7 @@ mod pdf;
 mod pin;
 mod pkcs11;
 mod protocol;
+mod token_detection;
 
 use std::io::{self, BufWriter, Write};
 
@@ -48,6 +49,11 @@ fn run(cfg: config::Config) -> anyhow::Result<()> {
                 return Ok(());
             }
             Err(framing::FrameError::TooLarge { limit, actual }) => {
+                tracing::warn!(
+                    limit,
+                    actual,
+                    "received oversized native message; sending MSG_TOO_LARGE response"
+                );
                 let resp = HostResponse::failure(
                     "unknown",
                     error_code::MSG_TOO_LARGE,
@@ -61,10 +67,12 @@ fn run(cfg: config::Config) -> anyhow::Result<()> {
                 return Err(e.into());
             }
         };
+        tracing::debug!(bytes = body.len(), "native frame received");
 
         let envelope: HostEnvelope = match serde_json::from_slice(&body) {
             Ok(e) => e,
             Err(e) => {
+                tracing::warn!(bytes = body.len(), error = %e, "invalid JSON envelope");
                 let resp = HostResponse::failure(
                     "unknown",
                     error_code::INVALID_JSON,
@@ -74,9 +82,39 @@ fn run(cfg: config::Config) -> anyhow::Result<()> {
                 continue;
             }
         };
+        tracing::info!(
+            request_id = %envelope.id,
+            cmd = ?envelope.cmd,
+            payload_type = %payload_kind(&envelope.payload),
+            "request accepted"
+        );
 
         let responses = commands::handle(&state, envelope);
+        tracing::debug!(
+            response_count = responses.len(),
+            "command handler produced responses"
+        );
         for response in responses {
+            if response.ok {
+                tracing::info!(
+                    request_id = %response.id,
+                    ok = true,
+                    "sending response"
+                );
+            } else if let Some(err) = response.error.as_ref() {
+                tracing::warn!(
+                    request_id = %response.id,
+                    ok = false,
+                    error_code = %err.code,
+                    "sending error response"
+                );
+            } else {
+                tracing::warn!(
+                    request_id = %response.id,
+                    ok = false,
+                    "sending error response without explicit error payload"
+                );
+            }
             write_response(&mut stdout, &response)?;
         }
     }
@@ -84,6 +122,22 @@ fn run(cfg: config::Config) -> anyhow::Result<()> {
 
 fn write_response<W: Write>(writer: &mut W, response: &HostResponse) -> anyhow::Result<()> {
     let body = serde_json::to_vec(response)?;
+    tracing::debug!(
+        request_id = %response.id,
+        bytes = body.len(),
+        "response encoded"
+    );
     framing::write_frame(writer, &body)?;
     Ok(())
+}
+
+fn payload_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
 }

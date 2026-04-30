@@ -15,7 +15,7 @@ cargo test --all-targets
 
 | Command          | Behaviour                                                          |
 | ---------------- | ------------------------------------------------------------------ |
-| `PING`           | Returns host version + protocol version                            |
+| `PING`           | Returns host version + protocol version; `tokenPresent` is `true` when PKCS#11 lists at least one slot with a token, or when a USB smart-token hint is detected while PKCS#11 is not ready. This is a connectivity hint only; signing still requires PKCS#11. |
 | `LIST_SLOTS`     | Enumerates PKCS#11 slots with present tokens                       |
 | `LIST_CERTS`     | Returns certificates on the requested slot                         |
 | `SIGN_PDF_START` | Begins a chunked PDF upload                                        |

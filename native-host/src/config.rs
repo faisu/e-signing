@@ -77,24 +77,65 @@ pub fn load() -> Result<Config> {
 pub fn discover_default_module() -> Option<PathBuf> {
     let candidates: &[&str] = if cfg!(target_os = "macos") {
         &[
+            // Hypersecu / HYP2003
+            "/usr/local/lib/libcastle_v2.1.0.0.dylib",
+            "/usr/local/lib/libcastle.dylib",
+            "/usr/lib/libcastle_v2.1.0.0.dylib",
+            "/usr/lib/libcastle.dylib",
+            "/opt/hypersecu/lib/libcastle.dylib",
+            "/Library/Frameworks/HyperSecu.framework/libcastle.dylib",
+            "/Volumes/HyperPKI_230404/libcastle.dylib",
+            "/Volumes/HyperPKI_230404/libcastle_v2.1.0.0.dylib",
+            "/usr/local/lib/libhypersecu_pkcs11.dylib",
+            "/usr/lib/libhypersecu_pkcs11.dylib",
+            "/opt/hypersecu/lib/libhypersecu_pkcs11.dylib",
+            "/Library/Frameworks/HyperSecu.framework/libhypersecu_pkcs11.dylib",
+            // eMudhra / eToken / Capricorn
+            "/opt/eMudhra/eToken/lib/libeTPkcs11.dylib",
+            "/usr/local/lib/libeTPkcs11.dylib",
+            "/usr/lib/libeTPkcs11.dylib",
+            "/usr/local/lib/libaetpkss.dylib",
+            "/usr/lib/libaetpkss.dylib",
+            "/Library/Frameworks/eToken.framework/Versions/Current/libeTPkcs11.dylib",
             "/Library/Frameworks/eToken.framework/Versions/A/libeToken.dylib",
             "/usr/local/lib/libeps2003csp11.dylib",
             "/usr/local/lib/libProxKeyTokenEngine_3_5.dylib",
             "/Library/eMudhraSecureSign/libeMudhraSecureSign.dylib",
+            // Generic fallback
+            "/usr/local/lib/pkcs11/libpkcs11.dylib",
+            "/opt/homebrew/lib/libpkcs11.dylib",
         ]
     } else if cfg!(target_os = "windows") {
         &[
+            // Hypersecu / HYP2003
+            r"C:\Windows\System32\hypersecu_pkcs11.dll",
+            r"C:\Program Files\Hypersecu\lib\hypersecu_pkcs11.dll",
+            // eMudhra / eToken / Capricorn
             r"C:\Windows\System32\eps2003csp11.dll",
             r"C:\Windows\System32\eTPKCS11.dll",
+            r"C:\Windows\System32\aetpkss.dll",
             r"C:\Windows\System32\SignatureP11.dll",
             r"C:\Windows\System32\WDPKCS.dll",
+            r"C:\Program Files\eMudhra\eToken\lib\eTPKCS11.dll",
+            r"C:\Program Files (x86)\eMudhra\eToken\lib\eTPKCS11.dll",
         ]
     } else {
         &[
+            // Hypersecu / HYP2003
+            "/usr/local/lib/libhypersecu_pkcs11.so",
+            "/usr/lib/libhypersecu_pkcs11.so",
+            // eMudhra / eToken / Capricorn
+            "/opt/eMudhra/eToken/lib/libeTPkcs11.so",
+            "/usr/lib/libaetpkss.so",
             "/usr/lib/x86_64-linux-gnu/libeps2003csp11.so",
             "/usr/lib/libeToken.so",
             "/usr/lib/libProxKeyTokenEngine_3_5.so",
             "/usr/lib/x86_64-linux-gnu/libeMudhraSecureSign.so",
+            // Generic fallback
+            "/usr/lib/pkcs11/libpkcs11.so",
+            "/usr/lib/x86_64-linux-gnu/pkcs11/libpkcs11.so",
+            "/usr/local/lib/pkcs11/libpkcs11.so",
+            "/usr/lib/x86_64-linux-gnu/libpkcs11.so",
         ]
     };
 
