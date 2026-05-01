@@ -21,6 +21,7 @@ pub const MAX_CHUNK_BYTES: usize = 256 * 1024;
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum HostCmd {
     Ping,
+    ListUsbTokens,
     ListSlots,
     ListCerts,
     SignPdfStart,
@@ -121,6 +122,7 @@ pub mod error_code {
     pub const UNKNOWN_CMD: &str = "UNKNOWN_CMD";
     pub const UNKNOWN_JOB: &str = "UNKNOWN_JOB";
     pub const INVALID_CHUNK_INDEX: &str = "INVALID_CHUNK_INDEX";
+    pub const USB_ENUM_FAILED: &str = "USB_ENUM_FAILED";
 
     pub const PKCS11_MODULE_NOT_FOUND: &str = "PKCS11_MODULE_NOT_FOUND";
     pub const PKCS11_INIT_FAILED: &str = "PKCS11_INIT_FAILED";

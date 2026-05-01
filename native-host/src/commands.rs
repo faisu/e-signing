@@ -100,6 +100,23 @@ pub fn handle(state: &State, env: HostEnvelope) -> Vec<HostResponse> {
                 }),
             )]
         }
+        HostCmd::ListUsbTokens => {
+            tracing::info!(request_id = %id, "LIST_USB_TOKENS requested");
+            match token_detection::list_usb_tokens() {
+                Ok(tokens) => {
+                    tracing::info!(
+                        request_id = %id,
+                        token_count = tokens.len(),
+                        "LIST_USB_TOKENS succeeded"
+                    );
+                    vec![HostResponse::success(id, json!({ "tokens": tokens }))]
+                }
+                Err(e) => {
+                    tracing::warn!(request_id = %id, "LIST_USB_TOKENS failed: {e:?}");
+                    vec![HostResponse::failure(id, err::USB_ENUM_FAILED, e.to_string())]
+                }
+            }
+        }
         HostCmd::ListSlots => match state.with_pkcs11(|c| c.list_slots()) {
             Ok(slots) => {
                 tracing::info!(
@@ -548,6 +565,25 @@ mod tests {
         let r = handle(&s, env);
         assert!(!r[0].ok);
         assert_eq!(r[0].error.as_ref().unwrap().code, err::UNKNOWN_JOB);
+    }
+
+    #[test]
+    fn list_usb_tokens_returns_well_formed_response() {
+        let env = HostEnvelope {
+            v: 1,
+            id: "usb-1".into(),
+            cmd: HostCmd::ListUsbTokens,
+            payload: Value::Null,
+        };
+        let r = handle(&state(), env);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].id, "usb-1");
+        if r[0].ok {
+            let tokens = &r[0].result.as_ref().unwrap()["tokens"];
+            assert!(tokens.is_array(), "tokens must be an array");
+        } else {
+            assert_eq!(r[0].error.as_ref().unwrap().code, err::USB_ENUM_FAILED);
+        }
     }
 
     #[test]

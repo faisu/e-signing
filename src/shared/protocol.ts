@@ -6,6 +6,7 @@ export const MAX_NATIVE_MESSAGE_BYTES = 1024 * 1024;
 
 export type HostCmd =
   | "PING"
+  | "LIST_USB_TOKENS"
   | "LIST_SLOTS"
   | "LIST_CERTS"
   | "SIGN_PDF_START"

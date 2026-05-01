@@ -5,6 +5,7 @@
 //! currently usable.
 
 use anyhow::Result;
+use serde::Serialize;
 
 /// Known DSC/smart-token vendors from the legacy JS host implementation.
 const KNOWN_DSC_VENDOR_IDS: &[u16] = &[
@@ -14,6 +15,16 @@ const KNOWN_DSC_VENDOR_IDS: &[u16] = &[
 ];
 
 const USB_CLASS_SMART_CARD: u8 = 0x0B;
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UsbTokenInfo {
+    pub id: String,
+    pub label: String,
+    pub manufacturer: Option<String>,
+    pub serial: Option<String>,
+    pub path: String,
+}
 
 /// Hybrid detector:
 /// - `true` if PKCS#11 reports token-present slots.
@@ -103,9 +114,147 @@ pub fn usb_token_hint_present() -> bool {
     false
 }
 
+/// Enumerates USB tokens using vendor/class heuristics only.
+/// This intentionally avoids PKCS#11 for discovery.
+pub fn list_usb_tokens() -> Result<Vec<UsbTokenInfo>> {
+    tracing::info!("USB token listing: starting enumeration");
+    let devices = rusb::devices()?;
+    let mut tokens = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for device in devices.iter() {
+        let descriptor = match device.device_descriptor() {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::debug!("USB token listing: skipping unreadable descriptor: {e}");
+                continue;
+            }
+        };
+
+        let mut matched_reason = classify_device(
+            descriptor.vendor_id(),
+            descriptor.class_code(),
+            descriptor.sub_class_code(),
+            descriptor.protocol_code(),
+            false,
+        );
+
+        if matched_reason.is_none() {
+            if let Ok(config) = device.active_config_descriptor() {
+                for interface in config.interfaces() {
+                    for iface_descriptor in interface.descriptors() {
+                        matched_reason = classify_device(
+                            descriptor.vendor_id(),
+                            descriptor.class_code(),
+                            descriptor.sub_class_code(),
+                            descriptor.protocol_code(),
+                            iface_descriptor.class_code() == USB_CLASS_SMART_CARD,
+                        );
+                        if matched_reason.is_some() {
+                            break;
+                        }
+                    }
+                    if matched_reason.is_some() {
+                        break;
+                    }
+                }
+            }
+        }
+
+        let Some(reason) = matched_reason else {
+            tracing::debug!(
+                vendor_id = descriptor.vendor_id(),
+                product_id = descriptor.product_id(),
+                bus = device.bus_number(),
+                address = device.address(),
+                "USB token listing: device ignored (no token heuristic match)"
+            );
+            continue;
+        };
+
+        let bus = device.bus_number();
+        let address = device.address();
+        let id = format!(
+            "{:04x}:{:04x}-{}-{}",
+            descriptor.vendor_id(),
+            descriptor.product_id(),
+            bus,
+            address
+        );
+
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+
+        let mut manufacturer = None;
+        let mut serial = None;
+        if let Ok(handle) = device.open() {
+            manufacturer = handle.read_manufacturer_string_ascii(&descriptor).ok();
+            serial = handle.read_serial_number_string_ascii(&descriptor).ok();
+        }
+
+        let label = format!(
+            "USB Token {:04X}:{:04X}",
+            descriptor.vendor_id(),
+            descriptor.product_id()
+        );
+        let path = format!("usb:{}:{}", bus, address);
+
+        tracing::info!(
+            token_id = %id,
+            vendor_id = descriptor.vendor_id(),
+            product_id = descriptor.product_id(),
+            bus,
+            address,
+            reason,
+            has_manufacturer = manufacturer.is_some(),
+            has_serial = serial.is_some(),
+            "USB token listing: matched token device"
+        );
+
+        tokens.push(UsbTokenInfo {
+            id,
+            label,
+            manufacturer,
+            serial,
+            path,
+        });
+    }
+
+    tracing::info!(token_count = tokens.len(), "USB token listing: completed enumeration");
+    Ok(tokens)
+}
+
+fn classify_device(
+    vendor_id: u16,
+    class_code: u8,
+    sub_class_code: u8,
+    protocol_code: u8,
+    has_smart_card_interface: bool,
+) -> Option<&'static str> {
+    if KNOWN_DSC_VENDOR_IDS.contains(&vendor_id) {
+        return Some("known_vendor");
+    }
+    if class_code == USB_CLASS_SMART_CARD {
+        return Some("device_class_smart_card");
+    }
+    // Keep some room for future tunings when vendors expose composite devices.
+    if has_smart_card_interface {
+        return Some("interface_class_smart_card");
+    }
+    tracing::trace!(
+        vendor_id,
+        class_code,
+        sub_class_code,
+        protocol_code,
+        "USB token listing: non-matching USB descriptor observed"
+    );
+    None
+}
+
 #[cfg(test)]
 mod tests {
-    use super::hybrid_token_present;
+    use super::{classify_device, hybrid_token_present, KNOWN_DSC_VENDOR_IDS, USB_CLASS_SMART_CARD};
     use anyhow::anyhow;
 
     #[test]
@@ -124,5 +273,30 @@ mod tests {
     fn hybrid_uses_usb_when_pkcs11_errors() {
         let value = hybrid_token_present(|| Err(anyhow!("pkcs11 failed")), || false);
         assert!(!value);
+    }
+
+    #[test]
+    fn classify_matches_known_vendor() {
+        let vendor = KNOWN_DSC_VENDOR_IDS[0];
+        let reason = classify_device(vendor, 0, 0, 0, false);
+        assert_eq!(reason, Some("known_vendor"));
+    }
+
+    #[test]
+    fn classify_matches_smart_card_class() {
+        let reason = classify_device(0xFFFF, USB_CLASS_SMART_CARD, 0, 0, false);
+        assert_eq!(reason, Some("device_class_smart_card"));
+    }
+
+    #[test]
+    fn classify_matches_smart_card_interface() {
+        let reason = classify_device(0xFFFF, 0, 0, 0, true);
+        assert_eq!(reason, Some("interface_class_smart_card"));
+    }
+
+    #[test]
+    fn classify_rejects_unknown_non_smart_card_devices() {
+        let reason = classify_device(0xFFFF, 0, 0, 0, false);
+        assert_eq!(reason, None);
     }
 }

@@ -3,5 +3,5 @@
   "description": "AutoDCR signing bridge",
   "path": "/Library/Application Support/AutoDCR/bridge/autodcr-bridge",
   "type": "stdio",
-  "allowed_origins": ["chrome-extension://kjdpncpkfldkbdajcapldehjclhheadi/"]
+  "allowed_origins": ["chrome-extension://mkehbdkfajlonfcffclobkpcmeecmfod/"]
 }

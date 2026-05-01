@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "vite build --watch",
     "build": "vite build",
-    "build:release": "bash ./scripts/build-release.sh",
+    "build:release": "AUTODCR_EXTENSION_ID=${AUTODCR_EXTENSION_ID:-kjdpncpkfldkbdajcapldehjclhheadi} bash ./scripts/build-release.sh",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "format": "prettier --check .",
