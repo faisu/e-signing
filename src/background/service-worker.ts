@@ -39,13 +39,29 @@ function createError(code: string, message: string): HostError {
 
 function ensurePort(): chrome.runtime.Port {
   if (nativePort) {
+    console.debug("[bridge:sw] reusing native port", {
+      pendingCount: pendingById.size
+    });
     return nativePort;
   }
 
+  console.info("[bridge:sw] connecting native host", { host: NATIVE_HOST_NAME });
   nativePort = chrome.runtime.connectNative(NATIVE_HOST_NAME);
   nativePort.onMessage.addListener((response: HostResponse<NativeResult>) => {
+    console.debug("[bridge:sw] native message received", {
+      requestId: response.id,
+      ok: response.ok,
+      resultType:
+        response.result && typeof response.result === "object"
+          ? (response.result as Record<string, unknown>).resultType
+          : null,
+      hasError: Boolean(response.error)
+    });
     const pending = pendingById.get(response.id);
     if (!pending) {
+      console.warn("[bridge:sw] received native response without pending request", {
+        requestId: response.id
+      });
       return;
     }
 
@@ -78,6 +94,10 @@ function ensurePort(): chrome.runtime.Port {
   nativePort.onDisconnect.addListener(() => {
     const message =
       chrome.runtime.lastError?.message ?? "Native host disconnected unexpectedly.";
+    console.warn("[bridge:sw] native port disconnected", {
+      message,
+      pendingCount: pendingById.size
+    });
     const error = createError("NATIVE_DISCONNECTED", message);
 
     for (const [id, pending] of pendingById.entries()) {
@@ -107,6 +127,13 @@ function collectChunk(requestId: string, chunkResult: NativeChunkedResult): void
   };
   existing.chunks[chunkResult.index] = chunkResult.chunk;
   chunkAccumulator.set(chunkResult.jobId, existing);
+  console.debug("[bridge:sw] collected native chunk", {
+    requestId,
+    jobId: chunkResult.jobId,
+    index: chunkResult.index,
+    totalChunks: chunkResult.totalChunks,
+    chunkLen: chunkResult.chunk.length
+  });
 
   // Keep request pending until final marker arrives.
   const pending = pendingById.get(requestId);
@@ -118,9 +145,16 @@ function collectChunk(requestId: string, chunkResult: NativeChunkedResult): void
 function assembleChunks(jobId: string): { signedPdfBase64: string; jobId: string } {
   const value = chunkAccumulator.get(jobId);
   if (!value) {
+    console.warn("[bridge:sw] final marker without chunk accumulator", { jobId });
     return { signedPdfBase64: "", jobId };
   }
   chunkAccumulator.delete(jobId);
+  const missingChunkCount = value.chunks.filter((chunk) => chunk.length === 0).length;
+  console.debug("[bridge:sw] assembled signed PDF chunks", {
+    jobId,
+    totalChunks: value.totalChunks,
+    missingChunkCount
+  });
   return {
     jobId,
     signedPdfBase64: value.chunks.join("")
@@ -138,6 +172,11 @@ function sendNativeMessage(cmd: HostCmd, requestId: string, payload: unknown): P
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       pendingById.delete(requestId);
+      console.error("[bridge:sw] native request timeout", {
+        requestId,
+        cmd,
+        timeoutMs: REQUEST_TIMEOUT_MS
+      });
       reject(createError("NATIVE_TIMEOUT", `Timed out waiting for ${cmd} response.`));
     }, REQUEST_TIMEOUT_MS);
 
@@ -148,10 +187,21 @@ function sendNativeMessage(cmd: HostCmd, requestId: string, payload: unknown): P
     });
 
     try {
+      console.info("[bridge:sw] sending native request", {
+        requestId,
+        cmd,
+        payloadKeys:
+          payload && typeof payload === "object" ? Object.keys(payload as Record<string, unknown>) : []
+      });
       ensurePort().postMessage(envelope);
     } catch (error) {
       clearTimeout(timer);
       pendingById.delete(requestId);
+      console.error("[bridge:sw] failed posting message to native host", {
+        requestId,
+        cmd,
+        error: error instanceof Error ? error.message : String(error)
+      });
       reject(
         createError(
           "NATIVE_SEND_FAILED",
@@ -167,6 +217,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   const cmd = message?.cmd as HostCmd | undefined;
 
   if (!cmd) {
+    console.warn("[bridge:sw] invalid extension request missing cmd", {
+      requestId
+    });
     sendResponse({
       ok: false,
       result: null,
@@ -177,6 +230,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   sendNativeMessage(cmd, requestId, message?.payload ?? {})
     .then((response) => {
+      console.info("[bridge:sw] native request resolved", {
+        requestId,
+        cmd,
+        ok: response.ok,
+        errorCode: response.error?.code ?? null
+      });
       sendResponse({
         ok: response.ok,
         result: response.result,
@@ -184,6 +243,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       });
     })
     .catch((error: HostError) => {
+      console.error("[bridge:sw] native request failed", {
+        requestId,
+        cmd,
+        errorCode: error.code,
+        message: error.message
+      });
       sendResponse({
         ok: false,
         result: null,

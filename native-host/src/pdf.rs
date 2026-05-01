@@ -49,8 +49,13 @@ pub struct SignaturePlaceholder {
 /// glyphs (typical of pre-flight placeholders) and a paired `/Contents <...>`.
 pub fn locate_placeholder(pdf: &[u8]) -> Result<SignaturePlaceholder> {
     let needle = b"/ByteRange";
+    tracing::debug!(
+        pdf_len = pdf.len(),
+        "locate_placeholder scanning for ByteRange/Contents markers"
+    );
     let br_idx = find_subsequence(pdf, needle)
         .ok_or_else(|| anyhow!("PDF does not contain a /ByteRange placeholder"))?;
+    tracing::debug!(byte_range_token_offset = br_idx, "locate_placeholder found /ByteRange token");
 
     // Skip whitespace + optional `[`.
     let mut i = br_idx + needle.len();
@@ -66,6 +71,12 @@ pub fn locate_placeholder(pdf: &[u8]) -> Result<SignaturePlaceholder> {
         .position(|&b| b == b']')
         .map(|p| i + p)
         .ok_or_else(|| anyhow!("/ByteRange missing closing ']'"))?;
+    tracing::debug!(
+        byte_range_start,
+        byte_range_end,
+        byte_range_width = byte_range_end - byte_range_start + 1,
+        "locate_placeholder resolved ByteRange array bounds"
+    );
 
     // /Contents must follow within a few bytes.
     let after_br = byte_range_end + 1;
@@ -90,6 +101,12 @@ pub fn locate_placeholder(pdf: &[u8]) -> Result<SignaturePlaceholder> {
     if contents_hex_len < 64 {
         bail!("/Contents placeholder too small (need at least 32 bytes of signature space)");
     }
+    tracing::debug!(
+        contents_open,
+        contents_close,
+        contents_hex_len,
+        "locate_placeholder resolved Contents placeholder bounds"
+    );
     Ok(SignaturePlaceholder {
         byte_range_start,
         byte_range_end,

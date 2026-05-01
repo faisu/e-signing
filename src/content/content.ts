@@ -9,6 +9,12 @@ function postError(
   code: string,
   message: string
 ): void {
+  console.error("[bridge:content] posting bridge error response", {
+    requestId,
+    origin,
+    code,
+    message
+  });
   const response: BridgeResponse = {
     source: BRIDGE_SOURCE,
     type: "RESPONSE",
@@ -27,6 +33,9 @@ window.addEventListener("message", async (event: MessageEvent) => {
   }
 
   if (!isAllowedOrigin(event.origin)) {
+    console.debug("[bridge:content] dropped message from disallowed origin", {
+      origin: event.origin
+    });
     return;
   }
 
@@ -34,6 +43,11 @@ window.addEventListener("message", async (event: MessageEvent) => {
   if (!data || data.source !== BRIDGE_SOURCE || data.type !== "REQUEST") {
     return;
   }
+  console.debug("[bridge:content] accepted page bridge request", {
+    origin: event.origin,
+    requestId: data.requestId ?? null,
+    cmd: data.cmd ?? null
+  });
 
   if (!data.requestId || !data.cmd) {
     postError(
@@ -46,10 +60,20 @@ window.addEventListener("message", async (event: MessageEvent) => {
   }
 
   try {
+    console.info("[bridge:content] forwarding request to service worker", {
+      requestId: data.requestId,
+      cmd: data.cmd
+    });
     const response = await chrome.runtime.sendMessage({
       requestId: data.requestId,
       cmd: data.cmd,
       payload: data.payload
+    });
+    console.info("[bridge:content] service worker responded", {
+      requestId: data.requestId,
+      cmd: data.cmd,
+      ok: response?.ok === true,
+      errorCode: response?.error?.code ?? null
     });
 
     const bridgeResponse: BridgeResponse = {
@@ -63,6 +87,11 @@ window.addEventListener("message", async (event: MessageEvent) => {
 
     window.postMessage(bridgeResponse, event.origin);
   } catch (error) {
+    console.error("[bridge:content] failed to reach service worker", {
+      requestId: data.requestId,
+      cmd: data.cmd,
+      error: error instanceof Error ? error.message : String(error)
+    });
     postError(
       data.requestId,
       event.origin,

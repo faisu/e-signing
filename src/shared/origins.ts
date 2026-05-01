@@ -1,5 +1,5 @@
 export const ALLOWED_ORIGINS = [
-  "http://192.168.1.8/*",
+  "http://192.168.1.8:3000",
   "http://localhost:3000",
   "https://autodcr.vercel.app"
 ] as const;

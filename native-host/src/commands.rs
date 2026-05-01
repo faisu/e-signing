@@ -299,6 +299,23 @@ fn handle_end(state: &State, id: &str, payload: SignPdfEndPayload) -> Vec<HostRe
         )];
     };
 
+    let missing_chunks: Vec<usize> = job
+        .chunks
+        .iter()
+        .enumerate()
+        .filter_map(|(index, chunk)| if chunk.is_empty() { Some(index) } else { None })
+        .collect();
+    if !missing_chunks.is_empty() {
+        tracing::warn!(
+            request_id = %id,
+            job_id = %payload.job_id,
+            total_chunks = job.total_chunks,
+            missing_chunk_count = missing_chunks.len(),
+            missing_chunk_preview = ?missing_chunks.iter().take(10).collect::<Vec<_>>(),
+            "SIGN_PDF_END received with missing chunks; assembled payload may be invalid"
+        );
+    }
+
     let assembled_b64: String = job.chunks.into_iter().collect();
     tracing::debug!(
         request_id = %id,
@@ -426,6 +443,19 @@ fn sign_pdf(
         )
     })?;
     tracing::debug!(slot_id, cert_id_len = cert_id.len(), "sign_pdf using certificate id");
+
+    tracing::debug!(
+        pdf_head_preview = %String::from_utf8_lossy(
+            &pdf_bytes[..pdf_bytes.len().min(256)]
+        ),
+        contains_byte_range_token = pdf_bytes
+            .windows(b"/ByteRange".len())
+            .any(|window| window == b"/ByteRange"),
+        contains_contents_token = pdf_bytes
+            .windows(b"/Contents".len())
+            .any(|window| window == b"/Contents"),
+        "sign_pdf inspecting PDF placeholder markers"
+    );
 
     let placeholder = pdf::locate_placeholder(pdf_bytes)
         .map_err(|e| SignError::Other(err::PDF_INVALID, e.to_string()))?;
