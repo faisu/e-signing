@@ -1,6 +1,6 @@
 [package]
 name = "autodcr-bridge"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["AutoDCR"]
 description = "AutoDCR Chrome native messaging host with PKCS#11 signing"

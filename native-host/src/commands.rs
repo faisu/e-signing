@@ -217,6 +217,11 @@ fn handle_start(state: &State, id: &str, payload: SignPdfStartPayload) -> HostRe
         slot_id = ?payload.slot_id,
         cert_id_present = payload.cert_id.is_some(),
         cert_id_len = payload.cert_id.as_ref().map(|v| v.len()).unwrap_or_default(),
+        cert_id_preview = payload
+            .cert_id
+            .as_deref()
+            .map(|v| preview_head_tail(v, 8, 8))
+            .unwrap_or_else(|| "none".to_string()),
         "SIGN_PDF_START accepted"
     );
     let job = SignJob {
@@ -298,6 +303,19 @@ fn handle_end(state: &State, id: &str, payload: SignPdfEndPayload) -> Vec<HostRe
             "SIGN_PDF_END received before SIGN_PDF_START.",
         )];
     };
+    tracing::debug!(
+        request_id = %id,
+        job_id = %payload.job_id,
+        slot_id = ?job.slot_id,
+        cert_id_present = job.cert_id.is_some(),
+        cert_id_len = job.cert_id.as_ref().map(|v| v.len()).unwrap_or_default(),
+        cert_id_preview = job
+            .cert_id
+            .as_deref()
+            .map(|v| preview_head_tail(v, 8, 8))
+            .unwrap_or_else(|| "none".to_string()),
+        "SIGN_PDF_END using job signing context"
+    );
 
     let missing_chunks: Vec<usize> = job
         .chunks
@@ -365,6 +383,14 @@ fn handle_end(state: &State, id: &str, payload: SignPdfEndPayload) -> Vec<HostRe
             tracing::warn!(
                 request_id = %id,
                 job_id = %payload.job_id,
+                slot_id = ?job.slot_id,
+                cert_id_present = job.cert_id.is_some(),
+                cert_id_len = job.cert_id.as_ref().map(|v| v.len()).unwrap_or_default(),
+                cert_id_preview = job
+                    .cert_id
+                    .as_deref()
+                    .map(|v| preview_head_tail(v, 8, 8))
+                    .unwrap_or_else(|| "none".to_string()),
                 error_code = code,
                 "SIGN_PDF_END signing failed: {msg}"
             );
@@ -509,6 +535,7 @@ fn sign_pdf(
             c.sign_digest(
                 slot_id,
                 cert_id,
+                &cert_der,
                 &pin,
                 &Mechanism::Sha256RsaPkcs,
                 signed_attrs_der,
@@ -552,6 +579,17 @@ fn chunk_string(s: &str, size: usize) -> Vec<String> {
         i = end;
     }
     out
+}
+
+fn preview_head_tail(value: &str, head: usize, tail: usize) -> String {
+    let len = value.chars().count();
+    if len <= head + tail {
+        return value.to_string();
+    }
+    let prefix: String = value.chars().take(head).collect();
+    let suffix_chars: Vec<char> = value.chars().rev().take(tail).collect();
+    let suffix: String = suffix_chars.into_iter().rev().collect();
+    format!("{prefix}...{suffix}")
 }
 
 #[cfg(test)]

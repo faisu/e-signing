@@ -13,7 +13,7 @@ use std::sync::Mutex;
 use anyhow::{anyhow, bail, Context, Result};
 use cryptoki::context::{CInitializeArgs, Pkcs11};
 use cryptoki::mechanism::Mechanism;
-use cryptoki::object::{Attribute, AttributeType, ObjectClass, ObjectHandle};
+use cryptoki::object::{Attribute, AttributeType, KeyType, ObjectClass, ObjectHandle};
 use cryptoki::session::{Session, UserType};
 use cryptoki::slot::Slot;
 use cryptoki::types::AuthPin;
@@ -127,15 +127,21 @@ impl Pkcs11Client {
         Ok(out)
     }
 
-    /// Sign `data` with the private key whose CKA_ID matches `cert_id_hex`.
-    /// The PIN is provided by [`crate::pin`].
+    /// Sign `data` with the private key paired to the certificate identified
+    /// by `cert_id_hex`. The PIN is provided by [`crate::pin`].
     ///
     /// The host caches the session for the lifetime of the connection, so the
     /// PIN dialog only appears once per port.
+    ///
+    /// Some tokens (e.g. HYP2003) store the certificate and its private key
+    /// with different `CKA_ID` values, so we accept the certificate DER and
+    /// fall back to matching by public-key components when the `CKA_ID`
+    /// lookup misses.
     pub fn sign_digest(
         &self,
         slot_id: u64,
         cert_id_hex: &str,
+        cert_der: &[u8],
         pin: &str,
         mechanism: &Mechanism,
         data: &[u8],
@@ -148,17 +154,7 @@ impl Pkcs11Client {
             .session;
 
         let cert_id = hex::decode(cert_id_hex).context("cert_id is not valid hex")?;
-        let template = vec![
-            Attribute::Class(ObjectClass::PRIVATE_KEY),
-            Attribute::Id(cert_id),
-        ];
-        let handles = session
-            .find_objects(&template)
-            .context("find private key for cert id")?;
-        let key_handle = handles
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow!("no private key with the requested CKA_ID"))?;
+        let key_handle = find_private_key_handle(session, &cert_id, cert_der)?;
 
         let signature = session
             .sign(mechanism, key_handle, data)
@@ -288,5 +284,163 @@ fn parse_metadata(
             Some(format!("{:x}", cert.serial)),
         ),
         Err(_) => (String::new(), String::new(), None, None, None),
+    }
+}
+
+/// Resolve the private key paired with the certificate identified by
+/// `cert_id`. First attempts the standard `CKA_ID` match, then falls back to
+/// matching by public-key components extracted from `cert_der`.
+fn find_private_key_handle(
+    session: &Session,
+    cert_id: &[u8],
+    cert_der: &[u8],
+) -> Result<ObjectHandle> {
+    let by_id = session
+        .find_objects(&[
+            Attribute::Class(ObjectClass::PRIVATE_KEY),
+            Attribute::Id(cert_id.to_vec()),
+        ])
+        .context("find private key by CKA_ID")?;
+    if let Some(handle) = by_id.into_iter().next() {
+        return Ok(handle);
+    }
+
+    tracing::warn!(
+        cert_id_hex = %hex::encode(cert_id),
+        "private key CKA_ID does not match certificate; falling back to public-key match"
+    );
+
+    use x509_parser::prelude::*;
+    use x509_parser::public_key::PublicKey;
+    let (_, cert) = X509Certificate::from_der(cert_der)
+        .map_err(|e| anyhow!("parse certificate DER for fallback: {e}"))?;
+    let parsed = cert
+        .public_key()
+        .parsed()
+        .map_err(|e| anyhow!("parse certificate public key for fallback: {e}"))?;
+
+    let candidates = session
+        .find_objects(&[Attribute::Class(ObjectClass::PRIVATE_KEY)])
+        .context("enumerate private keys for fallback match")?;
+    if candidates.is_empty() {
+        bail!("token has no private key objects after login");
+    }
+
+    let mut considered: Vec<String> = Vec::with_capacity(candidates.len());
+    for handle in &candidates {
+        let attrs = match session.get_attributes(
+            *handle,
+            &[
+                AttributeType::KeyType,
+                AttributeType::Id,
+                AttributeType::Modulus,
+                AttributeType::PublicExponent,
+                AttributeType::EcPoint,
+            ],
+        ) {
+            Ok(a) => a,
+            Err(e) => {
+                considered.push(format!("<get_attrs failed: {e}>"));
+                continue;
+            }
+        };
+
+        let mut key_type: Option<KeyType> = None;
+        let mut modulus: Vec<u8> = Vec::new();
+        let mut exponent: Vec<u8> = Vec::new();
+        let mut ec_point: Vec<u8> = Vec::new();
+        let mut cka_id_hex = String::new();
+        for attr in attrs {
+            match attr {
+                Attribute::KeyType(k) => key_type = Some(k),
+                Attribute::Modulus(v) => modulus = v,
+                Attribute::PublicExponent(v) => exponent = v,
+                Attribute::EcPoint(v) => ec_point = v,
+                Attribute::Id(v) => cka_id_hex = hex::encode(&v),
+                _ => {}
+            }
+        }
+        considered.push(format!(
+            "{{cka_id={cka_id_hex},key_type={:?}}}",
+            key_type
+        ));
+
+        let matched = match (&parsed, key_type) {
+            (PublicKey::RSA(rsa), Some(kt)) if kt == KeyType::RSA => {
+                !modulus.is_empty()
+                    && !exponent.is_empty()
+                    && strip_leading_zero(rsa.modulus) == strip_leading_zero(&modulus)
+                    && strip_leading_zero(rsa.exponent) == strip_leading_zero(&exponent)
+            }
+            (PublicKey::EC(point), Some(kt)) if kt == KeyType::EC => {
+                let needle = point.data();
+                !ec_point.is_empty()
+                    && !needle.is_empty()
+                    && (ec_point.as_slice() == needle
+                        || ec_point.windows(needle.len()).any(|w| w == needle))
+            }
+            _ => false,
+        };
+        if matched {
+            tracing::info!(
+                cka_id = %cka_id_hex,
+                "private key matched by public-key components"
+            );
+            return Ok(*handle);
+        }
+    }
+
+    bail!(
+        "no private key matches certificate public key (cert_id={}, considered=[{}])",
+        hex::encode(cert_id),
+        considered.join(", ")
+    )
+}
+
+/// Drop a single leading zero byte from a big-endian unsigned integer.
+/// ASN.1 INTEGER encodes magnitudes with the high bit set as `0x00 || bytes`
+/// to keep them positive; PKCS#11 returns the raw magnitude. Normalize both
+/// to the bare big-endian form before comparing.
+fn strip_leading_zero(bytes: &[u8]) -> &[u8] {
+    if bytes.len() > 1 && bytes[0] == 0 {
+        &bytes[1..]
+    } else {
+        bytes
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_leading_zero;
+
+    #[test]
+    fn strip_leading_zero_removes_single_leading_zero() {
+        assert_eq!(strip_leading_zero(&[0x00, 0xff, 0x01]), &[0xff, 0x01]);
+    }
+
+    #[test]
+    fn strip_leading_zero_preserves_no_leading_zero() {
+        assert_eq!(strip_leading_zero(&[0x7f, 0x01]), &[0x7f, 0x01]);
+    }
+
+    #[test]
+    fn strip_leading_zero_preserves_lone_zero() {
+        // A single 0x00 byte represents the integer zero; do not collapse to empty.
+        assert_eq!(strip_leading_zero(&[0x00]), &[0x00]);
+    }
+
+    #[test]
+    fn strip_leading_zero_keeps_only_one() {
+        // Only the single ASN.1 INTEGER sign byte is dropped; further leading
+        // zeros are part of the magnitude (rare, but handle defensively).
+        assert_eq!(
+            strip_leading_zero(&[0x00, 0x00, 0xab]),
+            &[0x00, 0xab]
+        );
+    }
+
+    #[test]
+    fn strip_leading_zero_handles_empty() {
+        assert_eq!(strip_leading_zero(&[]), &[] as &[u8]);
     }
 }
