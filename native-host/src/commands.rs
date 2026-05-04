@@ -517,7 +517,34 @@ fn sign_pdf(
     );
 
     let byte_range = pdf::compute_byte_range(pdf_bytes.len(), &placeholder);
-    let content_digest = pdf::digest_byte_range(pdf_bytes, &byte_range);
+
+    // Render the final ByteRange and substitute it into a working buffer
+    // BEFORE digesting. The digest must cover the bytes that will exist in
+    // the final file; otherwise Adobe reports "Document has been altered or
+    // corrupted since it was signed".
+    let target_width = placeholder.byte_range_end - placeholder.byte_range_start + 1;
+    let rendered_byte_range = pdf::render_byte_range(&byte_range, target_width);
+    if rendered_byte_range.len() != target_width {
+        return Err(SignError::Other(
+            err::PDF_INVALID,
+            format!(
+                "rendered ByteRange width {} does not match placeholder width {}; placeholder is too narrow for the actual offsets",
+                rendered_byte_range.len(),
+                target_width
+            ),
+        ));
+    }
+    let mut pre_signed = pdf_bytes.to_vec();
+    pre_signed[placeholder.byte_range_start..=placeholder.byte_range_end]
+        .copy_from_slice(rendered_byte_range.as_bytes());
+    tracing::debug!(
+        slot_id,
+        rendered_byte_range_len = rendered_byte_range.len(),
+        target_width,
+        "rendered byte range and spliced into pre-signing buffer"
+    );
+
+    let content_digest = pdf::digest_byte_range(&pre_signed, &byte_range);
     tracing::debug!(
         slot_id,
         byte_range_segments = byte_range.len(),
@@ -545,16 +572,7 @@ fn sign_pdf(
     .map_err(|e| SignError::Other(err::CMS_BUILD_FAILED, e.to_string()))?;
     tracing::debug!(slot_id, cms_der_bytes = cms_der.len(), "CMS signature built");
 
-    let target_width = placeholder.byte_range_end - placeholder.byte_range_start + 1;
-    let rendered_byte_range = pdf::render_byte_range(&byte_range, target_width);
-    tracing::debug!(
-        slot_id,
-        rendered_byte_range_len = rendered_byte_range.len(),
-        target_width,
-        "rendered byte range for PDF splice"
-    );
-
-    pdf::splice_signature(pdf_bytes, &placeholder, &rendered_byte_range, &cms_der)
+    pdf::splice_signature(&pre_signed, &placeholder, &rendered_byte_range, &cms_der)
         .map(|signed_pdf| {
             tracing::info!(
                 slot_id,
