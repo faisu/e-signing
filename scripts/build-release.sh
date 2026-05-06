@@ -9,11 +9,11 @@
 #   release/<basename>/AutoDCR-Bridge-<version>.pkg          (macOS only, if pkgbuild is available)
 #   release/<basename>/checksums.txt
 #
-# Cross-OS installers (.msi, .deb, .rpm) are produced by the GitHub Actions
-# release workflow at .github/workflows/release.yml. This script only handles
-# what's reproducible from a developer machine.
+# On Windows, this script can also produce:
+#   release/<basename>/autodcr-bridge-windows-x64.exe
+#   release/<basename>/AutoDCR-Bridge-<version>.msi            (if pwsh + wix are installed)
 #
-# Required env (only when building the .pkg):
+# Required env (only when building OS installers):
 #   AUTODCR_EXTENSION_ID   Chrome extension id baked into allowed_origins.
 
 set -euo pipefail
@@ -21,12 +21,15 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
+AUTODCR_EXTENSION_ID="${AUTODCR_EXTENSION_ID:-kjdpncpkfldkbdajcapldehjclhheadi}"
+
 APP_VERSION="$(node -p "require('./package.json').version")"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 RELEASE_ROOT="${ROOT_DIR}/release"
 RELEASE_BASENAME="autodcr-bridge-v${APP_VERSION}-${STAMP}"
 RELEASE_DIR="${RELEASE_ROOT}/${RELEASE_BASENAME}"
 LATEST_DIR="${RELEASE_ROOT}/latest"
+HOST_OS="$(uname -s)"
 
 echo "==> Building Chrome extension"
 npm run build
@@ -36,7 +39,7 @@ mkdir -p "${RELEASE_DIR}"
 echo "==> Packaging extension"
 (cd dist && zip -rq "${RELEASE_DIR}/extension.zip" .)
 
-if [[ "$(uname -s)" == "Darwin" ]]; then
+if [[ "${HOST_OS}" == "Darwin" ]]; then
   echo "==> Ensuring Rust targets are installed"
   rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
@@ -59,7 +62,7 @@ else
   (cd native-host && cargo build --release)
 fi
 
-if [[ "$(uname -s)" == "Darwin" ]] && command -v pkgbuild >/dev/null; then
+if [[ "${HOST_OS}" == "Darwin" ]] && command -v pkgbuild >/dev/null; then
   if [[ -z "${AUTODCR_EXTENSION_ID:-}" ]]; then
     echo "Skipping macOS .pkg build: AUTODCR_EXTENSION_ID not set"
   else
@@ -73,6 +76,28 @@ if [[ "$(uname -s)" == "Darwin" ]] && command -v pkgbuild >/dev/null; then
     cp installer/macos/dist/AutoDCR-Bridge-${APP_VERSION}.pkg "${RELEASE_DIR}/"
 
     rm -rf "${PAYLOAD_DIR}" "${ROOT_DIR}/installer/macos/dist"
+  fi
+fi
+
+if [[ "${HOST_OS}" == MINGW* || "${HOST_OS}" == MSYS* || "${HOST_OS}" == CYGWIN* ]]; then
+  echo "==> Building Windows native host (release, x64 MSVC)"
+  rustup target add x86_64-pc-windows-msvc
+  (cd native-host && cargo build --release --target x86_64-pc-windows-msvc)
+
+  mkdir -p "${ROOT_DIR}/artifacts/windows-x64"
+  cp "native-host/target/x86_64-pc-windows-msvc/release/autodcr-bridge.exe" \
+    "${ROOT_DIR}/artifacts/windows-x64/autodcr-bridge.exe"
+  cp "${ROOT_DIR}/artifacts/windows-x64/autodcr-bridge.exe" \
+    "${RELEASE_DIR}/autodcr-bridge-windows-x64.exe"
+
+  if command -v pwsh >/dev/null && command -v wix >/dev/null; then
+    echo "==> Building Windows .msi"
+    AUTODCR_VERSION="${APP_VERSION}" \
+      AUTODCR_EXTENSION_ID="${AUTODCR_EXTENSION_ID}" \
+      pwsh -NoProfile -File installer/windows/build-msi.ps1
+    cp "installer/windows/dist/AutoDCR-Bridge-${APP_VERSION}.msi" "${RELEASE_DIR}/"
+  else
+    echo "Skipping Windows .msi build: requires both 'pwsh' and 'wix' on PATH"
   fi
 fi
 

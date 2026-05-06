@@ -47,7 +47,7 @@ Wire a locally built host to a locally loaded extension using the steps in [docs
 AUTODCR_EXTENSION_ID=<your-extension-id> npm run build:release
 ```
 
-Produces `release/<basename>/extension.zip`, `autodcr-bridge-macos-arm64`, `autodcr-bridge-macos-x64`, `autodcr-bridge-macos-universal`, and (on macOS with `AUTODCR_EXTENSION_ID` set) `AutoDCR-Bridge-<version>.pkg`, plus `checksums.txt`. The full multi-OS release pipeline (`.pkg` + `.msi` + `.deb` + `.rpm` + checksums) is at `.github/workflows/release.yml` and runs on tag push.
+Produces `release/<basename>/extension.zip`, macOS native-host artifacts (`autodcr-bridge-macos-arm64`, `autodcr-bridge-macos-x64`, `autodcr-bridge-macos-universal`), and (on macOS with `pkgbuild`) `AutoDCR-Bridge-<version>.pkg`. On Windows (Git Bash/MSYS/Cygwin), it also builds `autodcr-bridge-windows-x64.exe` and, when `pwsh` + `wix` are available, `AutoDCR-Bridge-<version>.msi`. It also writes `checksums.txt`. The full multi-OS release pipeline (`.pkg` + `.msi` + `.deb` + `.rpm` + checksums) is at `.github/workflows/release.yml` and runs on tag push.
 
 ## Protocol summary
 
