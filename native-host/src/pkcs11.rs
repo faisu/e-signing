@@ -298,6 +298,8 @@ fn find_private_key_handle(
     let by_id = session
         .find_objects(&[
             Attribute::Class(ObjectClass::PRIVATE_KEY),
+            Attribute::Token(true),
+            Attribute::Private(true),
             Attribute::Id(cert_id.to_vec()),
         ])
         .context("find private key by CKA_ID")?;
@@ -319,11 +321,17 @@ fn find_private_key_handle(
         .parsed()
         .map_err(|e| anyhow!("parse certificate public key for fallback: {e}"))?;
 
-    let candidates = session
-        .find_objects(&[Attribute::Class(ObjectClass::PRIVATE_KEY)])
-        .context("enumerate private keys for fallback match")?;
+    let candidates = enumerate_private_keys(session)?;
+    tracing::info!(
+        cert_id_hex = %hex::encode(cert_id),
+        candidate_count = candidates.len(),
+        "fallback private-key enumeration complete"
+    );
     if candidates.is_empty() {
-        bail!("token has no private key objects after login");
+        bail!(
+            "token returned 0 private-key objects after login (tried CKA_TOKEN=true/CKA_PRIVATE=true \
+             and unfiltered class lookup); module may require additional attributes or a different login flow"
+        );
     }
 
     let mut considered: Vec<String> = Vec::with_capacity(candidates.len());
@@ -395,6 +403,35 @@ fn find_private_key_handle(
         hex::encode(cert_id),
         considered.join(", ")
     )
+}
+
+/// Enumerate private-key objects on the logged-in session.
+///
+/// HYP2003 (and several other Indian DSC tokens) only return private-key
+/// objects when the search template explicitly asks for `CKA_TOKEN=true`
+/// and `CKA_PRIVATE=true`; querying by `CKA_CLASS` alone returns 0 hits.
+/// A few older modules go the other way and refuse the strict template
+/// because they don't implement those attributes. Try strict first, then
+/// fall back to the original behaviour, and log which path produced the
+/// candidates so future failures are diagnosable.
+fn enumerate_private_keys(session: &Session) -> Result<Vec<ObjectHandle>> {
+    let strict = session
+        .find_objects(&[
+            Attribute::Class(ObjectClass::PRIVATE_KEY),
+            Attribute::Token(true),
+            Attribute::Private(true),
+        ])
+        .context("enumerate private keys (strict template)")?;
+    if !strict.is_empty() {
+        tracing::debug!(count = strict.len(), "private-key enumeration: strict template");
+        return Ok(strict);
+    }
+
+    let loose = session
+        .find_objects(&[Attribute::Class(ObjectClass::PRIVATE_KEY)])
+        .context("enumerate private keys (loose template)")?;
+    tracing::debug!(count = loose.len(), "private-key enumeration: loose template");
+    Ok(loose)
 }
 
 /// Drop a single leading zero byte from a big-endian unsigned integer.
