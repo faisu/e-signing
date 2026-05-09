@@ -516,6 +516,38 @@ fn sign_pdf(
         "certificate DER loaded from token"
     );
 
+    let from_token: Vec<Vec<u8>> = match state.with_pkcs11(|c| c.all_cert_ders(slot_id)) {
+        Ok(all) => all
+            .into_iter()
+            .filter(|der| der.as_slice() != cert_der.as_slice())
+            .collect(),
+        Err(e) => {
+            tracing::warn!(
+                slot_id,
+                error = %e,
+                "could not enumerate token certificates for chain embedding; will rely on bundle only"
+            );
+            Vec::new()
+        }
+    };
+    let from_bundle = crate::ca_bundle::build_chain(&cert_der);
+
+    let mut extra_certs: Vec<Vec<u8>> = Vec::with_capacity(from_token.len() + from_bundle.len());
+    let mut seen: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+    seen.insert(cert_der.clone());
+    for der in from_token.iter().chain(from_bundle.iter()) {
+        if seen.insert(der.clone()) {
+            extra_certs.push(der.clone());
+        }
+    }
+    tracing::info!(
+        slot_id,
+        from_token = from_token.len(),
+        from_bundle = from_bundle.len(),
+        extra_cert_count = extra_certs.len(),
+        "embedding intermediate certificates into CMS"
+    );
+
     let byte_range = pdf::compute_byte_range(pdf_bytes.len(), &placeholder);
 
     // Render the final ByteRange and substitute it into a working buffer
@@ -552,7 +584,7 @@ fn sign_pdf(
         "computed PDF byte range digest"
     );
 
-    let cms_der = pdf::build_cms_signature(&content_digest, &cert_der, &[], |signed_attrs_der| {
+    let cms_der = pdf::build_cms_signature(&content_digest, &cert_der, &extra_certs, |signed_attrs_der| {
         tracing::debug!(
             slot_id,
             signed_attrs_der_bytes = signed_attrs_der.len(),

@@ -3,6 +3,7 @@
 //! Wire contract: 4-byte little-endian length prefix + UTF-8 JSON envelope.
 //! See `docs/CHROME_EXTENSION_SPEC.md` for the higher-level contract.
 
+mod ca_bundle;
 mod commands;
 mod config;
 mod framing;

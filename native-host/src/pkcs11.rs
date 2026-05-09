@@ -186,6 +186,38 @@ impl Pkcs11Client {
         bail!("certificate object had no CKA_VALUE")
     }
 
+    /// Return every certificate DER stored on the token's slot. Used to
+    /// supply CMS `extra_certs` so Adobe can build the trust chain from the
+    /// signer leaf up to a root that's in its trusted list. The leaf cert is
+    /// included in the result; the caller is responsible for filtering it out.
+    pub fn all_cert_ders(&self, slot_id: u64) -> Result<Vec<Vec<u8>>> {
+        let slot = self.find_slot(slot_id)?;
+        let session = self
+            .inner
+            .open_ro_session(slot)
+            .context("open_ro_session for chain enumeration")?;
+        let handles = session
+            .find_objects(&[Attribute::Class(ObjectClass::CERTIFICATE)])
+            .context("find all certificate objects")?;
+        let mut out = Vec::with_capacity(handles.len());
+        for handle in handles {
+            let attrs = match session.get_attributes(handle, &[AttributeType::Value]) {
+                Ok(a) => a,
+                Err(e) => {
+                    tracing::warn!(error = %e, "skipping cert in chain enumeration");
+                    continue;
+                }
+            };
+            for attr in attrs {
+                if let Attribute::Value(v) = attr {
+                    out.push(v);
+                    break;
+                }
+            }
+        }
+        Ok(out)
+    }
+
     fn find_slot(&self, slot_id: u64) -> Result<Slot> {
         for slot in self.inner.get_all_slots()? {
             if slot.id() == slot_id {
