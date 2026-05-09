@@ -535,16 +535,26 @@ fn sign_pdf(
     let mut extra_certs: Vec<Vec<u8>> = Vec::with_capacity(from_token.len() + from_bundle.len());
     let mut seen: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
     seen.insert(cert_der.clone());
+    let mut dropped_roots: usize = 0;
     for der in from_token.iter().chain(from_bundle.iter()) {
-        if seen.insert(der.clone()) {
-            extra_certs.push(der.clone());
+        if !seen.insert(der.clone()) {
+            continue;
         }
+        // Self-signed roots add ~1.3 KB of CMS without affecting verification
+        // (Adobe / OS trust stores anchor on the root locally), and they push
+        // many real-world placeholders over their reserved size. Drop them.
+        if crate::ca_bundle::is_self_signed(der) {
+            dropped_roots += 1;
+            continue;
+        }
+        extra_certs.push(der.clone());
     }
     tracing::info!(
         slot_id,
         from_token = from_token.len(),
         from_bundle = from_bundle.len(),
         extra_cert_count = extra_certs.len(),
+        dropped_roots,
         "embedding intermediate certificates into CMS"
     );
 
