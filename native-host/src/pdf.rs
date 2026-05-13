@@ -43,23 +43,93 @@ pub struct SignaturePlaceholder {
     pub contents_hex_len: usize,
 }
 
-/// Find the first signature placeholder in the PDF.
+/// Find the unsigned signature placeholder in the PDF.
 ///
-/// Looks for `/ByteRange [` followed by an array containing zeros or `*`
-/// glyphs (typical of pre-flight placeholders) and a paired `/Contents <...>`.
+/// A PDF may contain multiple `/ByteRange` arrays — one per signature. Already
+/// completed signatures have numeric ByteRange values and a non-zero hex
+/// `/Contents`. The placeholder we want to fill is the one whose ByteRange
+/// array still contains `*` characters (the `/**********` PDF-name pattern
+/// emitted by signpdf / iText) OR whose paired `/Contents` hex is all zero.
+///
+/// We scan every `/ByteRange` occurrence and return the first that matches
+/// either placeholder condition. Picking blindly by position (first or last)
+/// is unsafe: pdf-lib sometimes saves the unsigned placeholder before, and
+/// sometimes after, existing signed revisions depending on the catalog
+/// arrangement.
 pub fn locate_placeholder(pdf: &[u8]) -> Result<SignaturePlaceholder> {
     let needle = b"/ByteRange";
     tracing::debug!(
         pdf_len = pdf.len(),
         "locate_placeholder scanning for ByteRange/Contents markers"
     );
-    let br_idx = find_subsequence(pdf, needle)
-        .ok_or_else(|| anyhow!("PDF does not contain a /ByteRange placeholder"))?;
-    tracing::debug!(byte_range_token_offset = br_idx, "locate_placeholder found /ByteRange token");
 
-    // Skip whitespace + optional `[`.
-    let mut i = br_idx + needle.len();
-    while i < pdf.len() && (pdf[i] == b' ' || pdf[i] == b'\r' || pdf[i] == b'\n') {
+    let mut search_from = 0usize;
+    let mut candidates_scanned = 0usize;
+    while search_from < pdf.len() {
+        let rel = match find_subsequence(&pdf[search_from..], needle) {
+            Some(r) => r,
+            None => break,
+        };
+        let br_idx = search_from + rel;
+        // Advance the cursor past this token so the next iteration can find
+        // subsequent /ByteRange occurrences even if this one isn't a placeholder.
+        search_from = br_idx + needle.len();
+        candidates_scanned += 1;
+
+        let parsed = match parse_byte_range_and_contents(pdf, br_idx) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::debug!(
+                    byte_range_token_offset = br_idx,
+                    error = %e,
+                    "locate_placeholder skipping malformed /ByteRange candidate"
+                );
+                continue;
+            }
+        };
+
+        let byte_range_body = &pdf[parsed.byte_range_start + 1..parsed.byte_range_end];
+        let contents_hex_body = &pdf[parsed.contents_open + 1..parsed.contents_close];
+
+        let br_has_asterisks = byte_range_body.iter().any(|&b| b == b'*');
+        let contents_all_zero =
+            !contents_hex_body.is_empty() && contents_hex_body.iter().all(is_pdf_hex_zero);
+
+        if br_has_asterisks || contents_all_zero {
+            tracing::debug!(
+                byte_range_token_offset = br_idx,
+                byte_range_start = parsed.byte_range_start,
+                byte_range_end = parsed.byte_range_end,
+                contents_open = parsed.contents_open,
+                contents_close = parsed.contents_close,
+                contents_hex_len = parsed.contents_hex_len,
+                br_has_asterisks,
+                contents_all_zero,
+                candidates_scanned,
+                "locate_placeholder selected unsigned placeholder candidate"
+            );
+            return Ok(parsed);
+        }
+
+        tracing::debug!(
+            byte_range_token_offset = br_idx,
+            "locate_placeholder ignoring already-filled /ByteRange (existing signature)"
+        );
+    }
+
+    bail!(
+        "PDF does not contain an unsigned /ByteRange placeholder (scanned {} candidate(s))",
+        candidates_scanned
+    )
+}
+
+/// Parse a single `/ByteRange [...] ... /Contents <...>` block starting at the
+/// offset of the `/ByteRange` token. Returns bounds for the array and the
+/// hex string. Used internally by [`locate_placeholder`] when iterating.
+fn parse_byte_range_and_contents(pdf: &[u8], br_token_offset: usize) -> Result<SignaturePlaceholder> {
+    let needle = b"/ByteRange";
+    let mut i = br_token_offset + needle.len();
+    while i < pdf.len() && is_pdf_whitespace(pdf[i]) {
         i += 1;
     }
     if i >= pdf.len() || pdf[i] != b'[' {
@@ -71,20 +141,13 @@ pub fn locate_placeholder(pdf: &[u8]) -> Result<SignaturePlaceholder> {
         .position(|&b| b == b']')
         .map(|p| i + p)
         .ok_or_else(|| anyhow!("/ByteRange missing closing ']'"))?;
-    tracing::debug!(
-        byte_range_start,
-        byte_range_end,
-        byte_range_width = byte_range_end - byte_range_start + 1,
-        "locate_placeholder resolved ByteRange array bounds"
-    );
 
-    // /Contents must follow within a few bytes.
     let after_br = byte_range_end + 1;
     let contents_needle = b"/Contents";
     let rel = find_subsequence(&pdf[after_br..], contents_needle)
-        .ok_or_else(|| anyhow!("/Contents placeholder missing"))?;
+        .ok_or_else(|| anyhow!("/Contents placeholder missing after /ByteRange"))?;
     let mut j = after_br + rel + contents_needle.len();
-    while j < pdf.len() && (pdf[j] == b' ' || pdf[j] == b'\r' || pdf[j] == b'\n') {
+    while j < pdf.len() && is_pdf_whitespace(pdf[j]) {
         j += 1;
     }
     if j >= pdf.len() || pdf[j] != b'<' {
@@ -101,12 +164,6 @@ pub fn locate_placeholder(pdf: &[u8]) -> Result<SignaturePlaceholder> {
     if contents_hex_len < 64 {
         bail!("/Contents placeholder too small (need at least 32 bytes of signature space)");
     }
-    tracing::debug!(
-        contents_open,
-        contents_close,
-        contents_hex_len,
-        "locate_placeholder resolved Contents placeholder bounds"
-    );
     Ok(SignaturePlaceholder {
         byte_range_start,
         byte_range_end,
@@ -114,6 +171,18 @@ pub fn locate_placeholder(pdf: &[u8]) -> Result<SignaturePlaceholder> {
         contents_close,
         contents_hex_len,
     })
+}
+
+fn is_pdf_whitespace(b: u8) -> bool {
+    matches!(b, b' ' | b'\r' | b'\n' | b'\t' | 0x0C | 0x00)
+}
+
+/// Returns true if the byte is a hex digit `0` or whitespace inside a
+/// `/Contents <...>` block. Placeholders are typically all `0` hex digits but
+/// real-world tooling occasionally interleaves whitespace; we treat both as
+/// "still empty" for placeholder detection.
+fn is_pdf_hex_zero(b: &u8) -> bool {
+    matches!(*b, b'0') || is_pdf_whitespace(*b)
 }
 
 /// Build the canonical four-segment ByteRange covering everything except the
@@ -353,6 +422,47 @@ mod tests {
         let ph = locate_placeholder(pdf).unwrap();
         assert_eq!(ph.contents_hex_len, 72);
         assert!(ph.contents_open < ph.contents_close);
+    }
+
+    #[test]
+    fn locate_placeholder_skips_filled_signature_and_finds_asterisk_placeholder() {
+        // Layout an existing signed revision (filled-in ByteRange + real hex
+        // CMS bytes) followed by an unsigned placeholder using the
+        // /********** PDF-name pattern emitted by @signpdf.
+        let pdf = b"%PDF-1.7\n\
+1 0 obj << /Type /Sig /ByteRange [0 12345 67890 5000] /Contents <30820123abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789> >> endobj\n\
+2 0 obj << /Type /Sig /ByteRange [0 /********** /********** /**********] /Contents <000000000000000000000000000000000000000000000000000000000000000000000000> >> endobj\n";
+        let ph = locate_placeholder(pdf).unwrap();
+        let body_with_asterisks = &pdf[ph.byte_range_start + 1..ph.byte_range_end];
+        assert!(body_with_asterisks.contains(&b'*'));
+        let hex_body = &pdf[ph.contents_open + 1..ph.contents_close];
+        assert!(hex_body.iter().all(|b| *b == b'0'));
+    }
+
+    #[test]
+    fn locate_placeholder_skips_filled_signature_and_finds_zero_contents_placeholder() {
+        // Same as above but the placeholder uses bare zero placeholders in
+        // the ByteRange array (some toolchains emit `[0 0 0 0]` rather than
+        // `*`). Detection should still succeed via the all-zero Contents.
+        let pdf = b"%PDF-1.7\n\
+1 0 obj << /Type /Sig /ByteRange [0 12345 67890 5000] /Contents <30820123abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789> >> endobj\n\
+2 0 obj << /Type /Sig /ByteRange [0 0 0 0] /Contents <000000000000000000000000000000000000000000000000000000000000000000000000> >> endobj\n";
+        let ph = locate_placeholder(pdf).unwrap();
+        let hex_body = &pdf[ph.contents_open + 1..ph.contents_close];
+        assert!(hex_body.iter().all(|b| *b == b'0'));
+    }
+
+    #[test]
+    fn locate_placeholder_errors_when_no_placeholder_remains() {
+        // Only an already-signed entry — no placeholder available.
+        let pdf = b"%PDF-1.7\n\
+1 0 obj << /Type /Sig /ByteRange [0 12345 67890 5000] /Contents <30820123abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789> >> endobj\n";
+        let err = locate_placeholder(pdf).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("does not contain an unsigned"),
+            "unexpected error message: {msg}"
+        );
     }
 
     #[test]
