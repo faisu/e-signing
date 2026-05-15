@@ -80,25 +80,77 @@ impl Pkcs11Client {
         })
     }
 
+    /// Enumerate every slot the loaded PKCS#11 module reports.
+    ///
+    /// Returns slots **with and without** a token. The earlier behaviour
+    /// (`get_slots_with_token`) hid empty readers, which made the
+    /// "LIST_SLOTS succeeded slot_count=0" state ambiguous: the caller
+    /// couldn't tell whether the module didn't see *any* readers (wrong
+    /// driver for the inserted token) or saw readers but no token in them
+    /// (token not seated / wrong reader). With this version the bridge-poc
+    /// page can surface that distinction.
     pub fn list_slots(&self) -> Result<Vec<SlotInfo>> {
-        let slots = self.inner.get_slots_with_token().context("get_slots")?;
-        let mut out = Vec::with_capacity(slots.len());
-        for slot in slots {
-            let info = self
-                .inner
-                .get_slot_info(slot)
-                .with_context(|| format!("get_slot_info({})", slot.id()))?;
-            let token_present = info.token_present();
-            let token = self
-                .inner
-                .get_token_info(slot)
-                .with_context(|| format!("get_token_info({})", slot.id()))?;
+        let all_slots = self.inner.get_all_slots().context("get_all_slots")?;
+        tracing::info!(
+            slot_count_total = all_slots.len(),
+            "PKCS#11 reported slots (including empty readers)"
+        );
+        let mut out = Vec::with_capacity(all_slots.len());
+        for slot in all_slots {
+            let slot_info = match self.inner.get_slot_info(slot) {
+                Ok(i) => i,
+                Err(e) => {
+                    tracing::warn!(slot_id = slot.id(), error = %e, "get_slot_info failed; skipping slot");
+                    continue;
+                }
+            };
+            let token_present = slot_info.token_present();
+
+            // Slots without a token have no usable TokenInfo. Populate label
+            // fields from SlotInfo (reader description) so the UI can still
+            // show *which* reader is empty.
+            let (label, manufacturer, model, serial) = if token_present {
+                match self.inner.get_token_info(slot) {
+                    Ok(t) => (
+                        t.label().to_string(),
+                        t.manufacturer_id().to_string(),
+                        t.model().to_string(),
+                        t.serial_number().to_string(),
+                    ),
+                    Err(e) => {
+                        tracing::warn!(
+                            slot_id = slot.id(),
+                            error = %e,
+                            "get_token_info failed despite token_present=true; reporting reader info only"
+                        );
+                        (
+                            slot_info.slot_description().to_string(),
+                            slot_info.manufacturer_id().to_string(),
+                            String::new(),
+                            String::new(),
+                        )
+                    }
+                }
+            } else {
+                tracing::info!(
+                    slot_id = slot.id(),
+                    reader = %slot_info.slot_description(),
+                    "PKCS#11 slot reports no token present"
+                );
+                (
+                    slot_info.slot_description().to_string(),
+                    slot_info.manufacturer_id().to_string(),
+                    String::new(),
+                    String::new(),
+                )
+            };
+
             out.push(SlotInfo {
                 id: slot.id(),
-                label: token.label().to_string(),
-                manufacturer: token.manufacturer_id().to_string(),
-                model: token.model().to_string(),
-                serial: token.serial_number().to_string(),
+                label,
+                manufacturer,
+                model,
+                serial,
                 token_present,
             });
         }

@@ -3,6 +3,7 @@
 //! for `LIST_SLOTS`, `LIST_CERTS`, and `SIGN_PDF_END`.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use anyhow::Context;
@@ -34,6 +35,9 @@ pub struct State {
     config: Config,
     sign_jobs: Mutex<HashMap<String, SignJob>>,
     pkcs11: Mutex<Option<Pkcs11Client>>,
+    /// Path that `pkcs11_or_load` resolved to. Surfaced via LIST_SLOTS so the
+    /// browser-side UI can show which driver is actually loaded.
+    pkcs11_module_path: Mutex<Option<PathBuf>>,
 }
 
 impl State {
@@ -42,6 +46,7 @@ impl State {
             config,
             sign_jobs: Mutex::new(HashMap::new()),
             pkcs11: Mutex::new(None),
+            pkcs11_module_path: Mutex::new(None),
         }
     }
 
@@ -59,9 +64,14 @@ impl State {
             .context("no PKCS#11 module configured and no vendor default detected")?;
         tracing::info!(module = %module.display(), "loading PKCS#11 module");
         let client = Pkcs11Client::load(&module)?;
-        tracing::info!("PKCS#11 module loaded successfully");
+        tracing::info!(module = %module.display(), "PKCS#11 module loaded successfully");
         *guard = Some(client);
+        *self.pkcs11_module_path.lock().unwrap() = Some(module);
         Ok(())
+    }
+
+    pub fn loaded_pkcs11_module(&self) -> Option<PathBuf> {
+        self.pkcs11_module_path.lock().unwrap().clone()
     }
 
     fn with_pkcs11<R>(
@@ -119,12 +129,26 @@ pub fn handle(state: &State, env: HostEnvelope) -> Vec<HostResponse> {
         }
         HostCmd::ListSlots => match state.with_pkcs11(|c| c.list_slots()) {
             Ok(slots) => {
+                let module_path = state
+                    .loaded_pkcs11_module()
+                    .map(|p| p.display().to_string());
+                let with_token = slots.iter().filter(|s| s.token_present).count();
                 tracing::info!(
                     request_id = %id,
                     slot_count = slots.len(),
+                    slot_count_with_token = with_token,
+                    module = module_path.as_deref().unwrap_or("<unknown>"),
                     "LIST_SLOTS succeeded"
                 );
-                vec![HostResponse::success(id, json!({ "slots": slots }))]
+                let usb_hint = token_detection::usb_token_hint_present();
+                vec![HostResponse::success(
+                    id,
+                    json!({
+                        "slots": slots,
+                        "pkcs11Module": module_path,
+                        "usbTokenLikelyPresent": usb_hint,
+                    }),
+                )]
             }
             Err(e) => {
                 tracing::warn!(request_id = %id, "LIST_SLOTS failed: {e:?}");
