@@ -3,15 +3,13 @@
 # Local release build. Produces:
 #
 #   release/<basename>/extension.zip
-#   release/<basename>/autodcr-bridge-macos-arm64             (macOS only)
-#   release/<basename>/autodcr-bridge-macos-x64               (macOS only)
-#   release/<basename>/autodcr-bridge-macos-universal         (macOS only)
-#   release/<basename>/AutoDCR-Bridge-<version>.pkg          (macOS only, if pkgbuild is available)
+#   release/<basename>/autodcr-bridge-macos-arm64             (macOS host)
+#   release/<basename>/autodcr-bridge-macos-x64               (macOS host)
+#   release/<basename>/autodcr-bridge-macos-universal         (macOS host)
+#   release/<basename>/autodcr-bridge-windows-x64.exe         (macOS host with cargo-xwin, or Windows host)
+#   release/<basename>/AutoDCR-Bridge-<version>.pkg          (macOS host, if pkgbuild is available)
+#   release/<basename>/AutoDCR-Bridge-<version>.msi            (Windows host only, if pwsh + wix are installed)
 #   release/<basename>/checksums.txt
-#
-# On Windows, this script can also produce:
-#   release/<basename>/autodcr-bridge-windows-x64.exe
-#   release/<basename>/AutoDCR-Bridge-<version>.msi            (if pwsh + wix are installed)
 #
 # Required env (only when building OS installers):
 #   AUTODCR_EXTENSION_ID   Chrome extension id baked into allowed_origins.
@@ -57,6 +55,19 @@ if [[ "${HOST_OS}" == "Darwin" ]]; then
     "${RELEASE_DIR}/autodcr-bridge-macos-arm64" \
     "${RELEASE_DIR}/autodcr-bridge-macos-x64" \
     -output "${RELEASE_DIR}/autodcr-bridge-macos-universal"
+
+  echo "==> Building Windows native host (release, x64 MSVC, cross-compile)"
+  rustup target add x86_64-pc-windows-msvc
+  if command -v cargo-xwin >/dev/null; then
+    (cd native-host && cargo xwin build --release --target x86_64-pc-windows-msvc)
+    mkdir -p "${ROOT_DIR}/artifacts/windows-x64"
+    cp "native-host/target/x86_64-pc-windows-msvc/release/autodcr-bridge.exe" \
+      "${ROOT_DIR}/artifacts/windows-x64/autodcr-bridge.exe"
+    cp "${ROOT_DIR}/artifacts/windows-x64/autodcr-bridge.exe" \
+      "${RELEASE_DIR}/autodcr-bridge-windows-x64.exe"
+  else
+    echo "Skipping Windows cross-compile: install cargo-xwin (cargo install cargo-xwin)"
+  fi
 else
   echo "==> Building native host (release)"
   (cd native-host && cargo build --release)
