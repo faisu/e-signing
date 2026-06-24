@@ -27,6 +27,15 @@ pub struct Config {
 
     /// Where the host writes its log file. Defaults to next to this config.
     pub log_dir: Option<PathBuf>,
+
+    /// How long to wait for vendor PKCS#11 `C_Initialize` before giving up.
+    /// Some drivers block indefinitely on PCSC when the reader is not ready.
+    #[serde(default = "default_pkcs11_init_timeout_secs")]
+    pub pkcs11_init_timeout_secs: u64,
+}
+
+fn default_pkcs11_init_timeout_secs() -> u64 {
+    15
 }
 
 fn default_true() -> bool {
@@ -39,6 +48,7 @@ impl Default for Config {
             pkcs11_module: None,
             prompt_pin: true,
             log_dir: None,
+            pkcs11_init_timeout_secs: default_pkcs11_init_timeout_secs(),
         }
     }
 }

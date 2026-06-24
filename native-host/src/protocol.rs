@@ -126,6 +126,7 @@ pub mod error_code {
 
     pub const PKCS11_MODULE_NOT_FOUND: &str = "PKCS11_MODULE_NOT_FOUND";
     pub const PKCS11_INIT_FAILED: &str = "PKCS11_INIT_FAILED";
+    pub const PKCS11_INIT_TIMEOUT: &str = "PKCS11_INIT_TIMEOUT";
     pub const PKCS11_SLOT_NOT_FOUND: &str = "PKCS11_SLOT_NOT_FOUND";
     pub const PKCS11_LOGIN_FAILED: &str = "PKCS11_LOGIN_FAILED";
     pub const PKCS11_SIGN_FAILED: &str = "PKCS11_SIGN_FAILED";
