@@ -132,6 +132,8 @@ pub mod error_code {
     pub const PKCS11_SIGN_FAILED: &str = "PKCS11_SIGN_FAILED";
     pub const CERT_NOT_FOUND: &str = "CERT_NOT_FOUND";
     pub const PIN_CANCELLED: &str = "PIN_CANCELLED";
+    pub const PIN_INCORRECT: &str = "PIN_INCORRECT";
+    pub const PIN_LOCKED: &str = "PIN_LOCKED";
     pub const PDF_INVALID: &str = "PDF_INVALID";
     pub const CMS_BUILD_FAILED: &str = "CMS_BUILD_FAILED";
 }

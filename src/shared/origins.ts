@@ -1,7 +1,8 @@
 export const ALLOWED_ORIGINS = [
   "http://192.168.1.9:3000",
   "http://localhost:3000",
-  "https://autodcr.vercel.app"
+  "https://autodcr.vercel.app",
+  "https://autodcr.bridgeit.in",
 ] as const;
 
 export function isAllowedOrigin(origin: string): boolean {

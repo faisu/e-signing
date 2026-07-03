@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use crate::config::{discover_default_module, Config};
 use crate::pdf;
 use crate::pin;
-use crate::pkcs11::Pkcs11Client;
+use crate::pkcs11::{LoginError, Pkcs11Client};
 use crate::protocol::{
     error_code as err, HostCmd, HostEnvelope, HostResponse, SignPdfChunkPayload, SignPdfEndPayload,
     SignPdfStartPayload, MAX_CHUNK_BYTES,
@@ -176,6 +176,16 @@ impl State {
             .as_ref()
             .expect("pkcs11 client must be loaded after pkcs11_or_load()");
         f(client)
+    }
+
+    fn verify_pin_login(&self, slot_id: u64, pin: &str) -> std::result::Result<(), LoginError> {
+        self.pkcs11_or_load()
+            .map_err(|e| LoginError::Other(e.to_string()))?;
+        let guard = self.pkcs11.lock().unwrap();
+        let client = guard
+            .as_ref()
+            .expect("pkcs11 client must be loaded after pkcs11_or_load()");
+        client.verify_login(slot_id, pin)
     }
 }
 
@@ -591,6 +601,35 @@ fn sign_pdf(
     })?;
     tracing::debug!(slot_id, cert_id_len = cert_id.len(), "sign_pdf using certificate id");
 
+    let pin = if state.config.prompt_pin {
+        tracing::debug!("prompting user for token PIN with verification");
+        match pin::prompt_and_verify_pin("AutoDCR token", 3, |p| {
+            state.verify_pin_login(slot_id, p)
+        }) {
+            Ok(p) => p,
+            Err(pin::PinError::Cancelled) => return Err(SignError::Cancelled),
+            Err(pin::PinError::Incorrect) => {
+                return Err(SignError::Other(
+                    err::PIN_INCORRECT,
+                    "Incorrect DSC PIN.".into(),
+                ));
+            }
+            Err(pin::PinError::Locked) => {
+                return Err(SignError::Other(
+                    err::PIN_LOCKED,
+                    "DSC token PIN is locked.".into(),
+                ));
+            }
+            Err(e) => return Err(SignError::Other(err::PIN_CANCELLED, e.to_string())),
+        }
+    } else {
+        return Err(SignError::Other(
+            err::PIN_CANCELLED,
+            "prompt_pin disabled in config and no other PIN source is implemented".into(),
+        ));
+    };
+    tracing::debug!("PIN verified successfully");
+
     tracing::debug!(
         pdf_head_preview = %String::from_utf8_lossy(
             &pdf_bytes[..pdf_bytes.len().min(256)]
@@ -612,21 +651,6 @@ fn sign_pdf(
         byte_range_end = placeholder.byte_range_end,
         "pdf placeholder located"
     );
-
-    let pin = if state.config.prompt_pin {
-        tracing::debug!("prompting user for token PIN");
-        match pin::prompt_pin("AutoDCR token") {
-            Ok(p) => p,
-            Err(pin::PinError::Cancelled) => return Err(SignError::Cancelled),
-            Err(e) => return Err(SignError::Other(err::PIN_CANCELLED, e.to_string())),
-        }
-    } else {
-        return Err(SignError::Other(
-            err::PIN_CANCELLED,
-            "prompt_pin disabled in config and no other PIN source is implemented".into(),
-        ));
-    };
-    tracing::debug!("PIN acquired successfully");
 
     let cert_der = state
         .with_pkcs11(|c| c.cert_der(slot_id, cert_id))
