@@ -8,10 +8,16 @@
 
 #![allow(dead_code)]
 
+use crate::pkcs11::LoginError;
+
 #[derive(Debug, thiserror::Error)]
 pub enum PinError {
     #[error("user cancelled the PIN prompt")]
     Cancelled,
+    #[error("incorrect DSC PIN after maximum attempts")]
+    Incorrect,
+    #[error("DSC token PIN is locked")]
+    Locked,
     #[error("no supported PIN dialog available")]
     NoDialog,
     #[error("dialog failed: {0}")]
@@ -21,21 +27,63 @@ pub enum PinError {
 pub type PinResult = std::result::Result<String, PinError>;
 
 pub fn prompt_pin(token_label: &str) -> PinResult {
+    prompt_pin_with_message(token_label, None)
+}
+
+/// Prompt for a PIN and verify it against the token, retrying up to `max_attempts`
+/// times when the PIN is incorrect.
+pub fn prompt_and_verify_pin<F>(
+    token_label: &str,
+    max_attempts: u32,
+    verify: F,
+) -> PinResult
+where
+    F: Fn(&str) -> std::result::Result<(), LoginError>,
+{
+    let attempts = max_attempts.max(1);
+    let mut error_message: Option<&str> = None;
+
+    for attempt in 0..attempts {
+        let pin = match prompt_pin_with_message(token_label, error_message) {
+            Ok(p) => p,
+            Err(e) => return Err(e),
+        };
+
+        match verify(&pin) {
+            Ok(()) => return Ok(pin),
+            Err(LoginError::Incorrect) => {
+                if attempt + 1 >= attempts {
+                    return Err(PinError::Incorrect);
+                }
+                error_message = Some("Incorrect PIN. Please try again.");
+            }
+            Err(LoginError::Locked) => return Err(PinError::Locked),
+            Err(LoginError::Other(msg)) => {
+                return Err(PinError::Other(anyhow::anyhow!(msg)));
+            }
+        }
+    }
+
+    Err(PinError::Incorrect)
+}
+
+fn prompt_pin_with_message(token_label: &str, error_message: Option<&str>) -> PinResult {
     #[cfg(target_os = "macos")]
     {
-        macos::prompt(token_label)
+        macos::prompt(token_label, error_message)
     }
     #[cfg(target_os = "linux")]
     {
-        linux::prompt(token_label)
+        linux::prompt(token_label, error_message)
     }
     #[cfg(target_os = "windows")]
     {
-        windows::prompt(token_label)
+        windows::prompt(token_label, error_message)
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         let _ = token_label;
+        let _ = error_message;
         Err(PinError::NoDialog)
     }
 }
@@ -45,12 +93,16 @@ mod macos {
     use super::*;
     use std::process::Command;
 
-    pub fn prompt(token_label: &str) -> PinResult {
+    pub fn prompt(token_label: &str, error_message: Option<&str>) -> PinResult {
         let safe_label = token_label.replace('"', "'");
+        let dialog_text = match error_message {
+            Some(err) => format!("{err}\n\nEnter PIN for {safe_label}"),
+            None => format!("Enter PIN for {safe_label}"),
+        };
+        let safe_text = dialog_text.replace('"', "'");
         let script = format!(
-            r#"set d to display dialog "Enter PIN for {0}" default answer "" with hidden answer with title "AutoDCR Bridge" buttons {{"Cancel", "OK"}} default button "OK"
-return text returned of d"#,
-            safe_label
+            r#"set d to display dialog "{safe_text}" default answer "" with hidden answer with title "AutoDCR Bridge" buttons {{"Cancel", "OK"}} default button "OK"
+return text returned of d"#
         );
 
         let output = Command::new("/usr/bin/osascript")
@@ -77,17 +129,17 @@ mod linux {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
-    pub fn prompt(token_label: &str) -> PinResult {
-        if let Some(pin) = try_pinentry(token_label)? {
+    pub fn prompt(token_label: &str, error_message: Option<&str>) -> PinResult {
+        if let Some(pin) = try_pinentry(token_label, error_message)? {
             return Ok(pin);
         }
-        if let Some(pin) = try_zenity(token_label)? {
+        if let Some(pin) = try_zenity(token_label, error_message)? {
             return Ok(pin);
         }
         Err(PinError::NoDialog)
     }
 
-    fn try_pinentry(token_label: &str) -> Result<Option<String>, PinError> {
+    fn try_pinentry(token_label: &str, error_message: Option<&str>) -> Result<Option<String>, PinError> {
         let mut child = match Command::new("pinentry")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -98,9 +150,13 @@ mod linux {
             Err(_) => return Ok(None),
         };
 
-        let prompt = format!(
-            "OPTION grab\nSETTITLE AutoDCR Bridge\nSETDESC Enter PIN for {token_label}\nSETPROMPT PIN:\nGETPIN\n"
+        let mut prompt = format!(
+            "OPTION grab\nSETTITLE AutoDCR Bridge\nSETDESC Enter PIN for {token_label}\n"
         );
+        if let Some(err) = error_message {
+            prompt.push_str(&format!("SETERROR {err}\n"));
+        }
+        prompt.push_str("SETPROMPT PIN:\nGETPIN\n");
 
         if let Some(stdin) = child.stdin.as_mut() {
             stdin
@@ -124,10 +180,14 @@ mod linux {
         Ok(None)
     }
 
-    fn try_zenity(token_label: &str) -> Result<Option<String>, PinError> {
+    fn try_zenity(token_label: &str, error_message: Option<&str>) -> Result<Option<String>, PinError> {
+        let text = match error_message {
+            Some(err) => format!("{err}\n\nEnter PIN for {token_label}"),
+            None => format!("Enter PIN for {token_label}"),
+        };
         let output = match Command::new("zenity")
             .args(["--password", "--title", "AutoDCR Bridge", "--text"])
-            .arg(format!("Enter PIN for {token_label}"))
+            .arg(text)
             .output()
         {
             Ok(o) => o,
@@ -158,9 +218,13 @@ mod windows {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    pub fn prompt(token_label: &str) -> PinResult {
+    pub fn prompt(token_label: &str, error_message: Option<&str>) -> PinResult {
         let caption = to_wide("AutoDCR Bridge");
-        let message = to_wide(&format!("Enter PIN for {token_label}"));
+        let message_text = match error_message {
+            Some(err) => format!("{err}\n\nEnter PIN for {token_label}"),
+            None => format!("Enter PIN for {token_label}"),
+        };
+        let message = to_wide(&message_text);
         let target_name = to_wide("AutoDCRBridge");
 
         let info = CREDUI_INFOW {

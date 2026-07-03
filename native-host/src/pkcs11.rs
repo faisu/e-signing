@@ -12,12 +12,21 @@ use std::sync::Mutex;
 
 use anyhow::{anyhow, bail, Context, Result};
 use cryptoki::context::{CInitializeArgs, Pkcs11};
+use cryptoki::error::{Error as Pkcs11Error, RvError};
 use cryptoki::mechanism::Mechanism;
 use cryptoki::object::{Attribute, AttributeType, KeyType, ObjectClass, ObjectHandle};
 use cryptoki::session::{Session, UserType};
 use cryptoki::slot::Slot;
 use cryptoki::types::AuthPin;
 use serde::Serialize;
+
+/// Structured outcome of a PKCS#11 `C_Login` attempt used by the PIN verify loop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoginError {
+    Incorrect,
+    Locked,
+    Other(String),
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -59,6 +68,16 @@ pub struct Pkcs11Client {
 struct CachedSession {
     slot_id: u64,
     session: Session,
+}
+
+impl Drop for Pkcs11Client {
+    fn drop(&mut self) {
+        *self.cached_session.get_mut().unwrap() = None;
+        // `Pkcs11::finalize` consumes `self`; we're in `Drop` so move out safely.
+        let pkcs11 = unsafe { std::ptr::read(&self.inner) };
+        pkcs11.finalize();
+        tracing::info!("PKCS#11 C_Finalize completed");
+    }
 }
 
 impl Pkcs11Client {
@@ -279,24 +298,52 @@ impl Pkcs11Client {
         bail!("slot id {slot_id} not present")
     }
 
-    fn ensure_session(&self, slot_id: u64, pin: &str) -> Result<()> {
-        let mut cached = self.cached_session.lock().unwrap();
-        if let Some(c) = cached.as_ref() {
-            if c.slot_id == slot_id {
-                return Ok(());
+    /// Verify the user PIN against the token via `C_Login`, caching the session
+    /// on success so subsequent signing reuses it without re-prompting.
+    pub fn verify_login(&self, slot_id: u64, pin: &str) -> std::result::Result<(), LoginError> {
+        {
+            let cached = self.cached_session.lock().unwrap();
+            if let Some(c) = cached.as_ref() {
+                if c.slot_id == slot_id {
+                    return Ok(());
+                }
             }
         }
 
-        let slot = self.find_slot(slot_id)?;
+        let slot = self
+            .find_slot(slot_id)
+            .map_err(|e| LoginError::Other(e.to_string()))?;
         let session = self
             .inner
             .open_rw_session(slot)
-            .context("open_rw_session for signing")?;
-        session
-            .login(UserType::User, Some(&AuthPin::new(pin.into())))
-            .context("C_Login (user) failed")?;
-        *cached = Some(CachedSession { slot_id, session });
-        Ok(())
+            .map_err(map_login_cryptoki_error)?;
+        match session.login(UserType::User, Some(&AuthPin::new(pin.into()))) {
+            Ok(()) => {
+                let mut cached = self.cached_session.lock().unwrap();
+                *cached = Some(CachedSession { slot_id, session });
+                Ok(())
+            }
+            Err(e) => Err(map_login_cryptoki_error(e)),
+        }
+    }
+
+    fn ensure_session(&self, slot_id: u64, pin: &str) -> Result<()> {
+        self.verify_login(slot_id, pin).map_err(|e| match e {
+            LoginError::Incorrect => anyhow!("C_Login (user) failed: incorrect PIN"),
+            LoginError::Locked => anyhow!("C_Login (user) failed: PIN locked"),
+            LoginError::Other(msg) => anyhow!("C_Login (user) failed: {msg}"),
+        })
+    }
+}
+
+fn map_login_cryptoki_error(e: Pkcs11Error) -> LoginError {
+    match e {
+        Pkcs11Error::Pkcs11(rv, _) => match rv {
+            RvError::PinIncorrect => LoginError::Incorrect,
+            RvError::PinLocked | RvError::PinExpired => LoginError::Locked,
+            other => LoginError::Other(other.to_string()),
+        },
+        other => LoginError::Other(other.to_string()),
     }
 }
 

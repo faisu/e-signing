@@ -4,7 +4,8 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use base64::Engine;
@@ -14,7 +15,7 @@ use serde_json::{json, Value};
 use crate::config::{discover_default_module, Config};
 use crate::pdf;
 use crate::pin;
-use crate::pkcs11::Pkcs11Client;
+use crate::pkcs11::{LoginError, Pkcs11Client};
 use crate::protocol::{
     error_code as err, HostCmd, HostEnvelope, HostResponse, SignPdfChunkPayload, SignPdfEndPayload,
     SignPdfStartPayload, MAX_CHUNK_BYTES,
@@ -22,6 +23,7 @@ use crate::protocol::{
 use crate::token_detection;
 
 const HOST_VERSION: &str = env!("CARGO_PKG_VERSION");
+const PKCS11_INIT_TIMEOUT_MARKER: &str = "PKCS11_INIT_TIMEOUT";
 
 struct SignJob {
     total_chunks: u32,
@@ -29,6 +31,13 @@ struct SignJob {
     slot_id: Option<u64>,
     cert_id: Option<String>,
 }
+
+struct Pkcs11LoadOutcome {
+    client: Pkcs11Client,
+    module: PathBuf,
+}
+
+type Pkcs11LoadSlot = Arc<Mutex<Option<Result<Pkcs11LoadOutcome, String>>>>;
 
 /// Per-port mutable state. Lives for one Chrome native port (one process).
 pub struct State {
@@ -38,6 +47,8 @@ pub struct State {
     /// Path that `pkcs11_or_load` resolved to. Surfaced via LIST_SLOTS so the
     /// browser-side UI can show which driver is actually loaded.
     pkcs11_module_path: Mutex<Option<PathBuf>>,
+    /// In-flight PKCS#11 load shared across concurrent commands.
+    pkcs11_load_slot: Mutex<Option<Pkcs11LoadSlot>>,
 }
 
 impl State {
@@ -47,27 +58,108 @@ impl State {
             sign_jobs: Mutex::new(HashMap::new()),
             pkcs11: Mutex::new(None),
             pkcs11_module_path: Mutex::new(None),
+            pkcs11_load_slot: Mutex::new(None),
+        }
+    }
+
+    fn resolve_pkcs11_module(&self) -> anyhow::Result<PathBuf> {
+        self.config
+            .pkcs11_module
+            .clone()
+            .or_else(discover_default_module)
+            .context("no PKCS#11 module configured and no vendor default detected")
+    }
+
+    fn pkcs11_init_timeout(&self) -> Duration {
+        Duration::from_secs(self.config.pkcs11_init_timeout_secs.max(1))
+    }
+
+    fn start_pkcs11_load_if_needed(&self, module: &PathBuf) -> Pkcs11LoadSlot {
+        let mut slot_guard = self.pkcs11_load_slot.lock().unwrap();
+        if let Some(slot) = slot_guard.as_ref() {
+            return slot.clone();
+        }
+
+        let slot: Pkcs11LoadSlot = Arc::new(Mutex::new(None));
+        let slot_for_thread = slot.clone();
+        let module_for_thread = module.clone();
+        tracing::info!(module = %module.display(), "loading PKCS#11 module");
+        std::thread::spawn(move || {
+            let outcome = Pkcs11Client::load(&module_for_thread)
+                .map(|client| Pkcs11LoadOutcome {
+                    client,
+                    module: module_for_thread,
+                })
+                .map_err(|e| e.to_string());
+            *slot_for_thread.lock().unwrap() = Some(outcome);
+        });
+        *slot_guard = Some(slot.clone());
+        slot
+    }
+
+    fn pkcs11_or_load_with_timeout(&self, timeout: Duration) -> anyhow::Result<()> {
+        if self.pkcs11.lock().unwrap().is_some() {
+            tracing::debug!("pkcs11 client already initialized");
+            return Ok(());
+        }
+
+        let module = self.resolve_pkcs11_module()?;
+        let slot = self.start_pkcs11_load_if_needed(&module);
+        let deadline = Instant::now() + timeout;
+
+        loop {
+            if self.pkcs11.lock().unwrap().is_some() {
+                return Ok(());
+            }
+
+            if let Some(outcome) = slot.lock().unwrap().take() {
+                return match outcome {
+                    Ok(loaded) => {
+                        tracing::info!(
+                            module = %loaded.module.display(),
+                            "PKCS#11 module loaded successfully"
+                        );
+                        *self.pkcs11.lock().unwrap() = Some(loaded.client);
+                        *self.pkcs11_module_path.lock().unwrap() = Some(loaded.module);
+                        *self.pkcs11_load_slot.lock().unwrap() = None;
+                        Ok(())
+                    }
+                    Err(message) => {
+                        *self.pkcs11_load_slot.lock().unwrap() = None;
+                        Err(anyhow::anyhow!(message))
+                    }
+                };
+            }
+
+            if Instant::now() >= deadline {
+                tracing::warn!(
+                    timeout_secs = timeout.as_secs(),
+                    module = %module.display(),
+                    "PKCS#11 init timed out; driver may be waiting on PCSC/smart-card reader"
+                );
+                return Err(anyhow::anyhow!(
+                    "{PKCS11_INIT_TIMEOUT_MARKER}: PKCS#11 init timed out after {}s (module {}). \
+                     The driver may be waiting on the smart-card reader. Re-seat the token, open \
+                     the vendor manager app, or restart the smart-card service.",
+                    timeout.as_secs(),
+                    module.display()
+                ));
+            }
+
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
 
     fn pkcs11_or_load(&self) -> anyhow::Result<()> {
-        let mut guard = self.pkcs11.lock().unwrap();
-        if guard.is_some() {
-            tracing::debug!("pkcs11 client already initialized");
-            return Ok(());
+        self.pkcs11_or_load_with_timeout(self.pkcs11_init_timeout())
+    }
+
+    fn pkcs11_load_error_code(message: &str) -> &'static str {
+        if message.contains(PKCS11_INIT_TIMEOUT_MARKER) {
+            err::PKCS11_INIT_TIMEOUT
+        } else {
+            err::PKCS11_INIT_FAILED
         }
-        let module = self
-            .config
-            .pkcs11_module
-            .clone()
-            .or_else(discover_default_module)
-            .context("no PKCS#11 module configured and no vendor default detected")?;
-        tracing::info!(module = %module.display(), "loading PKCS#11 module");
-        let client = Pkcs11Client::load(&module)?;
-        tracing::info!(module = %module.display(), "PKCS#11 module loaded successfully");
-        *guard = Some(client);
-        *self.pkcs11_module_path.lock().unwrap() = Some(module);
-        Ok(())
     }
 
     pub fn loaded_pkcs11_module(&self) -> Option<PathBuf> {
@@ -85,6 +177,16 @@ impl State {
             .expect("pkcs11 client must be loaded after pkcs11_or_load()");
         f(client)
     }
+
+    fn verify_pin_login(&self, slot_id: u64, pin: &str) -> std::result::Result<(), LoginError> {
+        self.pkcs11_or_load()
+            .map_err(|e| LoginError::Other(e.to_string()))?;
+        let guard = self.pkcs11.lock().unwrap();
+        let client = guard
+            .as_ref()
+            .expect("pkcs11 client must be loaded after pkcs11_or_load()");
+        client.verify_login(slot_id, pin)
+    }
 }
 
 pub fn handle(state: &State, env: HostEnvelope) -> Vec<HostResponse> {
@@ -92,8 +194,15 @@ pub fn handle(state: &State, env: HostEnvelope) -> Vec<HostResponse> {
     tracing::debug!(request_id = %id, cmd = ?env.cmd, "dispatching command");
     match env.cmd {
         HostCmd::Ping => {
+            let timeout = state.pkcs11_init_timeout();
             let token_present = token_detection::hybrid_token_present(
-                || state.with_pkcs11(|c| c.list_slots().map(|slots| !slots.is_empty())),
+                || {
+                    state.pkcs11_or_load_with_timeout(timeout)?;
+                    state.with_pkcs11(|c| {
+                        c.list_slots()
+                            .map(|slots| slots.iter().any(|s| s.token_present))
+                    })
+                },
                 token_detection::usb_token_hint_present,
             );
             tracing::info!(
@@ -151,12 +260,10 @@ pub fn handle(state: &State, env: HostEnvelope) -> Vec<HostResponse> {
                 )]
             }
             Err(e) => {
-                tracing::warn!(request_id = %id, "LIST_SLOTS failed: {e:?}");
-                vec![HostResponse::failure(
-                    id,
-                    err::PKCS11_INIT_FAILED,
-                    e.to_string(),
-                )]
+                let message = e.to_string();
+                let code = State::pkcs11_load_error_code(&message);
+                tracing::warn!(request_id = %id, error_code = code, "LIST_SLOTS failed: {message}");
+                vec![HostResponse::failure(id, code, message)]
             }
         },
         HostCmd::ListCerts => {
@@ -494,6 +601,35 @@ fn sign_pdf(
     })?;
     tracing::debug!(slot_id, cert_id_len = cert_id.len(), "sign_pdf using certificate id");
 
+    let pin = if state.config.prompt_pin {
+        tracing::debug!("prompting user for token PIN with verification");
+        match pin::prompt_and_verify_pin("AutoDCR token", 3, |p| {
+            state.verify_pin_login(slot_id, p)
+        }) {
+            Ok(p) => p,
+            Err(pin::PinError::Cancelled) => return Err(SignError::Cancelled),
+            Err(pin::PinError::Incorrect) => {
+                return Err(SignError::Other(
+                    err::PIN_INCORRECT,
+                    "Incorrect DSC PIN.".into(),
+                ));
+            }
+            Err(pin::PinError::Locked) => {
+                return Err(SignError::Other(
+                    err::PIN_LOCKED,
+                    "DSC token PIN is locked.".into(),
+                ));
+            }
+            Err(e) => return Err(SignError::Other(err::PIN_CANCELLED, e.to_string())),
+        }
+    } else {
+        return Err(SignError::Other(
+            err::PIN_CANCELLED,
+            "prompt_pin disabled in config and no other PIN source is implemented".into(),
+        ));
+    };
+    tracing::debug!("PIN verified successfully");
+
     tracing::debug!(
         pdf_head_preview = %String::from_utf8_lossy(
             &pdf_bytes[..pdf_bytes.len().min(256)]
@@ -515,21 +651,6 @@ fn sign_pdf(
         byte_range_end = placeholder.byte_range_end,
         "pdf placeholder located"
     );
-
-    let pin = if state.config.prompt_pin {
-        tracing::debug!("prompting user for token PIN");
-        match pin::prompt_pin("AutoDCR token") {
-            Ok(p) => p,
-            Err(pin::PinError::Cancelled) => return Err(SignError::Cancelled),
-            Err(e) => return Err(SignError::Other(err::PIN_CANCELLED, e.to_string())),
-        }
-    } else {
-        return Err(SignError::Other(
-            err::PIN_CANCELLED,
-            "prompt_pin disabled in config and no other PIN source is implemented".into(),
-        ));
-    };
-    tracing::debug!("PIN acquired successfully");
 
     let cert_der = state
         .with_pkcs11(|c| c.cert_der(slot_id, cert_id))
