@@ -67,6 +67,7 @@ pub struct Pkcs11Client {
 
 struct CachedSession {
     slot_id: u64,
+    token_serial: String,
     session: Session,
 }
 
@@ -289,6 +290,14 @@ impl Pkcs11Client {
         Ok(out)
     }
 
+    fn current_token_serial(&self, slot_id: u64) -> Option<String> {
+        let slot = self.find_slot(slot_id).ok()?;
+        self.inner
+            .get_token_info(slot)
+            .ok()
+            .map(|t| t.serial_number().to_string())
+    }
+
     fn find_slot(&self, slot_id: u64) -> Result<Slot> {
         for slot in self.inner.get_all_slots()? {
             if slot.id() == slot_id {
@@ -298,15 +307,19 @@ impl Pkcs11Client {
         bail!("slot id {slot_id} not present")
     }
 
-    /// Verify the user PIN against the token via `C_Login`, caching the session
-    /// on success so subsequent signing reuses it without re-prompting.
-    pub fn verify_login(&self, slot_id: u64, pin: &str) -> std::result::Result<(), LoginError> {
+    /// Actually verify a PIN against the token via `C_Login`. Always performs a
+    /// real login attempt — never short-circuits from the session cache. Used by
+    /// the PIN-prompt retry loop so that wrong PINs are always rejected.
+    ///
+    /// Does NOT cache the resulting session; `ensure_session` handles that
+    /// separately right before signing.
+    pub fn check_pin(&self, slot_id: u64, pin: &str) -> std::result::Result<(), LoginError> {
+        // Logout + drop any existing session so C_Login doesn't fail with
+        // CKR_USER_ALREADY_LOGGED_IN.
         {
-            let cached = self.cached_session.lock().unwrap();
-            if let Some(c) = cached.as_ref() {
-                if c.slot_id == slot_id {
-                    return Ok(());
-                }
+            let mut cached = self.cached_session.lock().unwrap();
+            if let Some(c) = cached.take() {
+                let _ = c.session.logout();
             }
         }
 
@@ -319,8 +332,59 @@ impl Pkcs11Client {
             .map_err(map_login_cryptoki_error)?;
         match session.login(UserType::User, Some(&AuthPin::new(pin.into()))) {
             Ok(()) => {
+                // Session drops here — we only needed to confirm the PIN.
+                // ensure_session will open a fresh session for signing.
+                Ok(())
+            }
+            Err(e) => Err(map_login_cryptoki_error(e)),
+        }
+    }
+
+    /// Reuse a cached session when the same token is still inserted, or open a
+    /// new one and login. Used by `sign_digest` to get a logged-in session for
+    /// the actual cryptographic operation.
+    fn verify_login(&self, slot_id: u64, pin: &str) -> std::result::Result<(), LoginError> {
+        let current_serial = self.current_token_serial(slot_id);
+        {
+            let cached = self.cached_session.lock().unwrap();
+            if let Some(c) = cached.as_ref() {
+                if c.slot_id == slot_id
+                    && current_serial.as_deref() == Some(c.token_serial.as_str())
+                {
+                    return Ok(());
+                }
+            }
+        }
+
+        {
+            let mut cached = self.cached_session.lock().unwrap();
+            if let Some(c) = cached.take() {
+                let _ = c.session.logout();
+            }
+        }
+
+        let serial = current_serial.unwrap_or_default();
+        tracing::info!(
+            slot_id,
+            token_serial = %serial,
+            "opening new PKCS#11 session (token changed or first login)"
+        );
+
+        let slot = self
+            .find_slot(slot_id)
+            .map_err(|e| LoginError::Other(e.to_string()))?;
+        let session = self
+            .inner
+            .open_rw_session(slot)
+            .map_err(map_login_cryptoki_error)?;
+        match session.login(UserType::User, Some(&AuthPin::new(pin.into()))) {
+            Ok(()) => {
                 let mut cached = self.cached_session.lock().unwrap();
-                *cached = Some(CachedSession { slot_id, session });
+                *cached = Some(CachedSession {
+                    slot_id,
+                    token_serial: serial,
+                    session,
+                });
                 Ok(())
             }
             Err(e) => Err(map_login_cryptoki_error(e)),

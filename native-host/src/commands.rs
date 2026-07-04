@@ -178,14 +178,14 @@ impl State {
         f(client)
     }
 
-    fn verify_pin_login(&self, slot_id: u64, pin: &str) -> std::result::Result<(), LoginError> {
+    fn check_pin_login(&self, slot_id: u64, pin: &str) -> std::result::Result<(), LoginError> {
         self.pkcs11_or_load()
             .map_err(|e| LoginError::Other(e.to_string()))?;
         let guard = self.pkcs11.lock().unwrap();
         let client = guard
             .as_ref()
             .expect("pkcs11 client must be loaded after pkcs11_or_load()");
-        client.verify_login(slot_id, pin)
+        client.check_pin(slot_id, pin)
     }
 }
 
@@ -601,35 +601,6 @@ fn sign_pdf(
     })?;
     tracing::debug!(slot_id, cert_id_len = cert_id.len(), "sign_pdf using certificate id");
 
-    let pin = if state.config.prompt_pin {
-        tracing::debug!("prompting user for token PIN with verification");
-        match pin::prompt_and_verify_pin("AutoDCR token", 3, |p| {
-            state.verify_pin_login(slot_id, p)
-        }) {
-            Ok(p) => p,
-            Err(pin::PinError::Cancelled) => return Err(SignError::Cancelled),
-            Err(pin::PinError::Incorrect) => {
-                return Err(SignError::Other(
-                    err::PIN_INCORRECT,
-                    "Incorrect DSC PIN.".into(),
-                ));
-            }
-            Err(pin::PinError::Locked) => {
-                return Err(SignError::Other(
-                    err::PIN_LOCKED,
-                    "DSC token PIN is locked.".into(),
-                ));
-            }
-            Err(e) => return Err(SignError::Other(err::PIN_CANCELLED, e.to_string())),
-        }
-    } else {
-        return Err(SignError::Other(
-            err::PIN_CANCELLED,
-            "prompt_pin disabled in config and no other PIN source is implemented".into(),
-        ));
-    };
-    tracing::debug!("PIN verified successfully");
-
     tracing::debug!(
         pdf_head_preview = %String::from_utf8_lossy(
             &pdf_bytes[..pdf_bytes.len().min(256)]
@@ -738,6 +709,40 @@ fn sign_pdf(
         digest_bytes = content_digest.len(),
         "computed PDF byte range digest"
     );
+
+    // Prompt for PIN AFTER all cert reads so that no other PKCS#11 sessions
+    // are opened between login and signing. Single-session token drivers
+    // (HYP2003, ePass2003) invalidate a logged-in RW session when a new
+    // RO session is opened, so the login must be the last thing before
+    // sign_digest.
+    let pin = if state.config.prompt_pin {
+        tracing::debug!("prompting user for token PIN with verification");
+        match pin::prompt_and_verify_pin("AutoDCR token", 3, |p| {
+            state.check_pin_login(slot_id, p)
+        }) {
+            Ok(p) => p,
+            Err(pin::PinError::Cancelled) => return Err(SignError::Cancelled),
+            Err(pin::PinError::Incorrect) => {
+                return Err(SignError::Other(
+                    err::PIN_INCORRECT,
+                    "Incorrect DSC PIN.".into(),
+                ));
+            }
+            Err(pin::PinError::Locked) => {
+                return Err(SignError::Other(
+                    err::PIN_LOCKED,
+                    "DSC token PIN is locked.".into(),
+                ));
+            }
+            Err(e) => return Err(SignError::Other(err::PIN_CANCELLED, e.to_string())),
+        }
+    } else {
+        return Err(SignError::Other(
+            err::PIN_CANCELLED,
+            "prompt_pin disabled in config and no other PIN source is implemented".into(),
+        ));
+    };
+    tracing::debug!("PIN verified successfully");
 
     let cms_der = pdf::build_cms_signature(&content_digest, &cert_der, &extra_certs, |signed_attrs_der| {
         tracing::debug!(

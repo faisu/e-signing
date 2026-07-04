@@ -87,16 +87,22 @@ window.addEventListener("message", async (event: MessageEvent) => {
 
     window.postMessage(bridgeResponse, event.origin);
   } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
     console.error("[bridge:content] failed to reach service worker", {
       requestId: data.requestId,
       cmd: data.cmd,
-      error: error instanceof Error ? error.message : String(error)
+      error: msg
     });
+
+    const isContextInvalidated =
+      msg.includes("Extension context invalidated") ||
+      msg.includes("context invalidated");
+
     postError(
       data.requestId,
       event.origin,
-      "RUNTIME_SEND_FAILED",
-      error instanceof Error ? error.message : "Failed to send request to service worker."
+      isContextInvalidated ? "EXTENSION_CONTEXT_INVALIDATED" : "RUNTIME_SEND_FAILED",
+      msg
     );
   }
 });
