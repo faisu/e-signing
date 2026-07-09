@@ -715,7 +715,14 @@ fn sign_pdf(
     // (HYP2003, ePass2003) invalidate a logged-in RW session when a new
     // RO session is opened, so the login must be the last thing before
     // sign_digest.
-    let pin = if state.config.prompt_pin {
+    let reuse_session = state
+        .with_pkcs11(|c| Ok(c.has_valid_session(slot_id)))
+        .unwrap_or(false);
+
+    let pin = if reuse_session {
+        tracing::info!(slot_id, "reusing cached PKCS#11 session; skipping PIN prompt");
+        String::new()
+    } else if state.config.prompt_pin {
         tracing::debug!("prompting user for token PIN with verification");
         match pin::prompt_and_verify_pin("AutoDCR token", 3, |p| {
             state.check_pin_login(slot_id, p)

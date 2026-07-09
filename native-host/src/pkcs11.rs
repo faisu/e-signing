@@ -178,25 +178,29 @@ impl Pkcs11Client {
     }
 
     pub fn list_certs(&self, slot_id: u64) -> Result<Vec<CertInfo>> {
+        self.evict_stale_cached_session(slot_id);
+
+        if let Some(certs) = self.try_list_certs_from_cached_session(slot_id)? {
+            return Ok(certs);
+        }
+
+        self.clear_cached_session();
         let slot = self.find_slot(slot_id)?;
         let session = self
             .inner
             .open_ro_session(slot)
             .context("open_ro_session for cert listing")?;
 
-        let template = vec![Attribute::Class(ObjectClass::CERTIFICATE)];
-        let handles = session
-            .find_objects(&template)
-            .context("find certificate objects")?;
+        list_certs_in_session(&session)
+    }
 
-        let mut out = Vec::with_capacity(handles.len());
-        for handle in handles {
-            match read_cert(&session, handle) {
-                Ok(cert) => out.push(cert),
-                Err(e) => tracing::warn!("skipping cert: {e:?}"),
-            }
-        }
-        Ok(out)
+    /// True when a logged-in PKCS#11 session for `slot_id` is cached and still
+    /// usable. Used to skip the PIN prompt on back-to-back signs (Mac-like).
+    pub fn has_valid_session(&self, slot_id: u64) -> bool {
+        let guard = self.cached_session.lock().unwrap();
+        guard
+            .as_ref()
+            .is_some_and(|c| self.cached_session_matches(c, slot_id) && session_is_usable(&c.session))
     }
 
     /// Sign `data` with the private key paired to the certificate identified
@@ -231,31 +235,31 @@ impl Pkcs11Client {
         let signature = session
             .sign(mechanism, key_handle, data)
             .context("C_Sign failed")?;
+
+        if !session_is_usable(session) {
+            tracing::info!(slot_id, "PKCS#11 session unusable after sign; clearing cache");
+            drop(guard);
+            self.clear_cached_session();
+        }
+
         Ok(signature)
     }
 
     pub fn cert_der(&self, slot_id: u64, cert_id_hex: &str) -> Result<Vec<u8>> {
+        let cert_id = hex::decode(cert_id_hex).context("cert_id is not valid hex")?;
+
+        self.evict_stale_cached_session(slot_id);
+
+        if let Some(der) = self.try_cert_der_from_cached_session(slot_id, &cert_id)? {
+            return Ok(der);
+        }
+
+        // HYP2003 / ePass2003 allow only one PKCS#11 session. Drop any stale cache
+        // before opening a read-only session so we do not sign with a dead handle.
+        self.clear_cached_session();
         let slot = self.find_slot(slot_id)?;
         let session = self.inner.open_ro_session(slot)?;
-        let cert_id = hex::decode(cert_id_hex).context("cert_id is not valid hex")?;
-        let template = vec![
-            Attribute::Class(ObjectClass::CERTIFICATE),
-            Attribute::Id(cert_id),
-        ];
-        let handles = session.find_objects(&template).context("find_objects")?;
-        let handle = handles
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow!("certificate with requested CKA_ID not found"))?;
-        let attrs = session
-            .get_attributes(handle, &[AttributeType::Value])
-            .context("read CKA_VALUE")?;
-        for attr in attrs {
-            if let Attribute::Value(v) = attr {
-                return Ok(v);
-            }
-        }
-        bail!("certificate object had no CKA_VALUE")
+        read_cert_der_in_session(&session, &cert_id)
     }
 
     /// Return every certificate DER stored on the token's slot. Used to
@@ -263,31 +267,19 @@ impl Pkcs11Client {
     /// signer leaf up to a root that's in its trusted list. The leaf cert is
     /// included in the result; the caller is responsible for filtering it out.
     pub fn all_cert_ders(&self, slot_id: u64) -> Result<Vec<Vec<u8>>> {
+        self.evict_stale_cached_session(slot_id);
+
+        if let Some(ders) = self.try_all_cert_ders_from_cached_session(slot_id)? {
+            return Ok(ders);
+        }
+
+        self.clear_cached_session();
         let slot = self.find_slot(slot_id)?;
         let session = self
             .inner
             .open_ro_session(slot)
             .context("open_ro_session for chain enumeration")?;
-        let handles = session
-            .find_objects(&[Attribute::Class(ObjectClass::CERTIFICATE)])
-            .context("find all certificate objects")?;
-        let mut out = Vec::with_capacity(handles.len());
-        for handle in handles {
-            let attrs = match session.get_attributes(handle, &[AttributeType::Value]) {
-                Ok(a) => a,
-                Err(e) => {
-                    tracing::warn!(error = %e, "skipping cert in chain enumeration");
-                    continue;
-                }
-            };
-            for attr in attrs {
-                if let Attribute::Value(v) = attr {
-                    out.push(v);
-                    break;
-                }
-            }
-        }
-        Ok(out)
+        read_all_cert_ders_in_session(&session)
     }
 
     fn current_token_serial(&self, slot_id: u64) -> Option<String> {
@@ -332,8 +324,7 @@ impl Pkcs11Client {
             .map_err(map_login_cryptoki_error)?;
         match session.login(UserType::User, Some(&AuthPin::new(pin.into()))) {
             Ok(()) => {
-                // Session drops here — we only needed to confirm the PIN.
-                // ensure_session will open a fresh session for signing.
+                let _ = session.logout();
                 Ok(())
             }
             Err(e) => Err(map_login_cryptoki_error(e)),
@@ -348,9 +339,10 @@ impl Pkcs11Client {
         {
             let cached = self.cached_session.lock().unwrap();
             if let Some(c) = cached.as_ref() {
-                if c.slot_id == slot_id
-                    && current_serial.as_deref() == Some(c.token_serial.as_str())
+                if self.cached_session_matches(c, slot_id)
+                    && session_is_usable(&c.session)
                 {
+                    tracing::debug!(slot_id, "reusing cached PKCS#11 session");
                     return Ok(());
                 }
             }
@@ -398,6 +390,142 @@ impl Pkcs11Client {
             LoginError::Other(msg) => anyhow!("C_Login (user) failed: {msg}"),
         })
     }
+
+    fn cached_session_matches(&self, cached: &CachedSession, slot_id: u64) -> bool {
+        if cached.slot_id != slot_id {
+            return false;
+        }
+        self.current_token_serial(slot_id)
+            .is_some_and(|serial| serial == cached.token_serial)
+    }
+
+    fn clear_cached_session(&self) {
+        let mut guard = self.cached_session.lock().unwrap();
+        if let Some(c) = guard.take() {
+            let _ = c.session.logout();
+        }
+    }
+
+    /// Drop a cached login when the inserted token changed or the session died.
+    fn evict_stale_cached_session(&self, slot_id: u64) {
+        let should_clear = {
+            let guard = self.cached_session.lock().unwrap();
+            guard.as_ref().is_some_and(|c| {
+                !self.cached_session_matches(c, slot_id) || !session_is_usable(&c.session)
+            })
+        };
+        if should_clear {
+            tracing::info!(slot_id, "evicting stale PKCS#11 session cache");
+            self.clear_cached_session();
+        }
+    }
+
+    fn try_cert_der_from_cached_session(
+        &self,
+        slot_id: u64,
+        cert_id: &[u8],
+    ) -> Result<Option<Vec<u8>>> {
+        let guard = self.cached_session.lock().unwrap();
+        let Some(cached) = guard.as_ref() else {
+            return Ok(None);
+        };
+        if !self.cached_session_matches(cached, slot_id) || !session_is_usable(&cached.session) {
+            return Ok(None);
+        }
+        Ok(Some(read_cert_der_in_session(&cached.session, cert_id)?))
+    }
+
+    fn try_all_cert_ders_from_cached_session(
+        &self,
+        slot_id: u64,
+    ) -> Result<Option<Vec<Vec<u8>>>> {
+        let guard = self.cached_session.lock().unwrap();
+        let Some(cached) = guard.as_ref() else {
+            return Ok(None);
+        };
+        if !self.cached_session_matches(cached, slot_id) || !session_is_usable(&cached.session) {
+            return Ok(None);
+        }
+        Ok(Some(read_all_cert_ders_in_session(&cached.session)?))
+    }
+
+    fn try_list_certs_from_cached_session(
+        &self,
+        slot_id: u64,
+    ) -> Result<Option<Vec<CertInfo>>> {
+        let guard = self.cached_session.lock().unwrap();
+        let Some(cached) = guard.as_ref() else {
+            return Ok(None);
+        };
+        if !self.cached_session_matches(cached, slot_id) || !session_is_usable(&cached.session) {
+            return Ok(None);
+        }
+        Ok(Some(list_certs_in_session(&cached.session)?))
+    }
+}
+
+fn session_is_usable(session: &Session) -> bool {
+    session.get_session_info().is_ok()
+}
+
+fn read_cert_der_in_session(session: &Session, cert_id: &[u8]) -> Result<Vec<u8>> {
+    let template = vec![
+        Attribute::Class(ObjectClass::CERTIFICATE),
+        Attribute::Id(cert_id.to_vec()),
+    ];
+    let handles = session.find_objects(&template).context("find_objects")?;
+    let handle = handles
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow!("certificate with requested CKA_ID not found"))?;
+    let attrs = session
+        .get_attributes(handle, &[AttributeType::Value])
+        .context("read CKA_VALUE")?;
+    for attr in attrs {
+        if let Attribute::Value(v) = attr {
+            return Ok(v);
+        }
+    }
+    bail!("certificate object had no CKA_VALUE")
+}
+
+fn read_all_cert_ders_in_session(session: &Session) -> Result<Vec<Vec<u8>>> {
+    let handles = session
+        .find_objects(&[Attribute::Class(ObjectClass::CERTIFICATE)])
+        .context("find all certificate objects")?;
+    let mut out = Vec::with_capacity(handles.len());
+    for handle in handles {
+        let attrs = match session.get_attributes(handle, &[AttributeType::Value]) {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::warn!(error = %e, "skipping cert in chain enumeration");
+                continue;
+            }
+        };
+        for attr in attrs {
+            if let Attribute::Value(v) = attr {
+                out.push(v);
+                break;
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn list_certs_in_session(session: &Session) -> Result<Vec<CertInfo>> {
+    let template = vec![Attribute::Class(ObjectClass::CERTIFICATE)];
+    let handles = session
+        .find_objects(&template)
+        .context("find certificate objects")?;
+
+    let mut out = Vec::with_capacity(handles.len());
+    for handle in handles {
+        match read_cert(session, handle) {
+            Ok(cert) => out.push(cert),
+            Err(e) => tracing::warn!("skipping cert: {e:?}"),
+        }
+    }
+    Ok(out)
 }
 
 fn map_login_cryptoki_error(e: Pkcs11Error) -> LoginError {

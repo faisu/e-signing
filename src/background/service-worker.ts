@@ -31,7 +31,15 @@ type NativeResult = NativeChunkedResult | NativeFinalResult | Record<string, unk
 let nativePort: chrome.runtime.Port | null = null;
 const pendingById = new Map<string, PendingRequest>();
 const chunkAccumulator = new Map<string, { totalChunks: number; chunks: string[] }>();
-const REQUEST_TIMEOUT_MS = 30_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const SIGN_PDF_END_TIMEOUT_MS = 120_000;
+
+function requestTimeoutMs(cmd: HostCmd): number {
+  if (cmd === "SIGN_PDF_END") {
+    return SIGN_PDF_END_TIMEOUT_MS;
+  }
+  return DEFAULT_REQUEST_TIMEOUT_MS;
+}
 
 function createError(code: string, message: string): HostError {
   return { code, message };
@@ -170,15 +178,16 @@ function sendNativeMessage(cmd: HostCmd, requestId: string, payload: unknown): P
   };
 
   return new Promise((resolve, reject) => {
+    const timeoutMs = requestTimeoutMs(cmd);
     const timer = setTimeout(() => {
       pendingById.delete(requestId);
       console.error("[bridge:sw] native request timeout", {
         requestId,
         cmd,
-        timeoutMs: REQUEST_TIMEOUT_MS
+        timeoutMs
       });
       reject(createError("NATIVE_TIMEOUT", `Timed out waiting for ${cmd} response.`));
-    }, REQUEST_TIMEOUT_MS);
+    }, timeoutMs);
 
     pendingById.set(requestId, {
       resolve,

@@ -117,11 +117,14 @@ pub fn discover_default_module() -> Option<PathBuf> {
         ]
     } else if cfg!(target_os = "windows") {
         &[
-            // Hypersecu / HYP2003
+            // Hypersecu / HYP2003 (newer middleware uses HyperPKICsp11_2003.dll)
+            r"C:\Windows\System32\HyperPKICsp11_2003.dll",
+            r"C:\Windows\SysWOW64\HyperPKICsp11_2003.dll",
             r"C:\Windows\System32\hypersecu_pkcs11.dll",
             r"C:\Program Files\Hypersecu\lib\hypersecu_pkcs11.dll",
             // eMudhra / eToken / Capricorn
             r"C:\Windows\System32\eps2003csp11.dll",
+            r"C:\Windows\System32\eps2003csp11v2.dll",
             r"C:\Windows\System32\eTPKCS11.dll",
             r"C:\Windows\System32\aetpkss.dll",
             r"C:\Windows\System32\SignatureP11.dll",

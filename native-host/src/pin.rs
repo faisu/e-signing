@@ -4,7 +4,7 @@
 //! Behaviour:
 //! - macOS: AppleScript dialog via `osascript` (always present on macOS).
 //! - Linux: `pinentry`, falling back to `zenity --password`.
-//! - Windows: `CredUIPromptForCredentialsW` from `credui.dll`.
+//! - Windows: PowerShell WinForms dialog (`TopMost`) so the prompt stays above Chrome.
 
 #![allow(dead_code)]
 
@@ -207,73 +207,96 @@ mod linux {
 #[cfg(target_os = "windows")]
 mod windows {
     use super::{PinError, PinResult};
-    use ::windows::core::PCWSTR;
-    use ::windows::Win32::Foundation::{ERROR_CANCELLED, ERROR_SUCCESS};
-    use ::windows::Win32::Security::Credentials::{
-        CredUIPromptForCredentialsW, CREDUI_FLAGS, CREDUI_FLAGS_DO_NOT_PERSIST,
-        CREDUI_FLAGS_GENERIC_CREDENTIALS, CREDUI_FLAGS_KEEP_USERNAME, CREDUI_INFOW,
-    };
+    use std::process::Command;
 
-    fn to_wide(s: &str) -> Vec<u16> {
-        s.encode_utf16().chain(std::iter::once(0)).collect()
+    fn ps_single_quote(value: &str) -> String {
+        value.replace('\'', "''")
     }
 
     pub fn prompt(token_label: &str, error_message: Option<&str>) -> PinResult {
-        let caption = to_wide("AutoDCR Bridge");
-        let message_text = match error_message {
+        let body = match error_message {
             Some(err) => format!("{err}\n\nEnter PIN for {token_label}"),
             None => format!("Enter PIN for {token_label}"),
         };
-        let message = to_wide(&message_text);
-        let target_name = to_wide("AutoDCRBridge");
+        let body_q = ps_single_quote(&body);
+        let label_q = ps_single_quote(token_label);
 
-        let info = CREDUI_INFOW {
-            cbSize: std::mem::size_of::<CREDUI_INFOW>() as u32,
-            hwndParent: Default::default(),
-            pszMessageText: PCWSTR(message.as_ptr()),
-            pszCaptionText: PCWSTR(caption.as_ptr()),
-            hbmBanner: Default::default(),
-        };
+        // WinForms TopMost dialog — stays above Chrome unlike CredUI child windows.
+        let script = format!(
+            r#"
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+[System.Windows.Forms.Application]::EnableVisualStyles()
+$form = New-Object System.Windows.Forms.Form
+$form.Text = 'AutoDCR Bridge'
+$form.TopMost = $true
+$form.StartPosition = 'CenterScreen'
+$form.FormBorderStyle = 'FixedDialog'
+$form.MaximizeBox = $false
+$form.MinimizeBox = $false
+$form.ShowInTaskbar = $true
+$form.Width = 460
+$form.Height = 200
+$label = New-Object System.Windows.Forms.Label
+$label.Text = '{body_q}'
+$label.AutoSize = $false
+$label.Width = 420
+$label.Height = 50
+$label.Location = New-Object System.Drawing.Point(12, 12)
+$box = New-Object System.Windows.Forms.TextBox
+$box.UseSystemPasswordChar = $true
+$box.Width = 420
+$box.Location = New-Object System.Drawing.Point(12, 72)
+$ok = New-Object System.Windows.Forms.Button
+$ok.Text = 'OK'
+$ok.DialogResult = [System.Windows.Forms.DialogResult]::OK
+$ok.Location = New-Object System.Drawing.Point(260, 115)
+$ok.Width = 80
+$cancel = New-Object System.Windows.Forms.Button
+$cancel.Text = 'Cancel'
+$cancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+$cancel.Location = New-Object System.Drawing.Point(350, 115)
+$cancel.Width = 80
+$form.Controls.AddRange(@($label, $box, $ok, $cancel))
+$form.AcceptButton = $ok
+$form.CancelButton = $cancel
+$form.Add_Shown({{ $form.Activate(); $box.Focus() | Out-Null }})
+$result = $form.ShowDialog()
+if ($result -eq [System.Windows.Forms.DialogResult]::OK) {{
+  if ([string]::IsNullOrWhiteSpace($box.Text)) {{ exit 2 }}
+  Write-Output $box.Text
+}} else {{
+  exit 1
+}}
+"#
+        );
 
-        let mut user = vec![0u16; 256];
-        let mut pin = vec![0u16; 256];
-        // Pre-seed username with the token label so the user only types the PIN.
-        let label_w = to_wide(token_label);
-        let copy_len = label_w.len().min(user.len() - 1);
-        user[..copy_len].copy_from_slice(&label_w[..copy_len]);
+        let output = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-STA",
+                "-Command",
+                &script,
+            ])
+            .output()
+            .map_err(|e| PinError::Other(anyhow::anyhow!("PowerShell PIN dialog spawn: {e}")))?;
 
-        let mut save = false.into();
-
-        let flags: CREDUI_FLAGS = CREDUI_FLAGS_GENERIC_CREDENTIALS
-            | CREDUI_FLAGS_DO_NOT_PERSIST
-            | CREDUI_FLAGS_KEEP_USERNAME;
-
-        // SAFETY: All buffers outlive the call.
-        let result = unsafe {
-            CredUIPromptForCredentialsW(
-                Some(&info),
-                PCWSTR(target_name.as_ptr()),
-                None,
-                0,
-                &mut user,
-                &mut pin,
-                Some(&mut save),
-                flags,
-            )
-        };
-
-        match result {
-            ERROR_SUCCESS => {
-                let len = pin.iter().position(|&c| c == 0).unwrap_or(pin.len());
-                let s = String::from_utf16_lossy(&pin[..len]);
-                if s.is_empty() {
-                    Err(PinError::Cancelled)
-                } else {
-                    Ok(s)
-                }
-            }
-            ERROR_CANCELLED => Err(PinError::Cancelled),
-            err => Err(PinError::Other(anyhow::anyhow!("CredUI failed: {:?}", err))),
+        if output.status.code() == Some(1) {
+            return Err(PinError::Cancelled);
         }
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(PinError::Other(anyhow::anyhow!(
+                "PowerShell PIN dialog failed (token={label_q}): {stderr}"
+            )));
+        }
+
+        let pin = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if pin.is_empty() {
+            return Err(PinError::Cancelled);
+        }
+        Ok(pin)
     }
 }
