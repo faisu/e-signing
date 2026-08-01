@@ -12,3 +12,8 @@ installer/**/payload/
 installer/**/dist/
 installer/**/build/
 artifacts/
+
+# Extension private key (public key lives in src/manifest.json)
+keys/extension.pem
+
+dist.zip

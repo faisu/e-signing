@@ -81,14 +81,15 @@ print(json.loads(out[4:4+length]))
 ## Wire to a locally-loaded extension
 
 1. Build the host: `cargo build --release` (in `native-host/`).
-2. Build the extension: `npm run build` (in repo root). Note its extension
-   ID after loading `dist/` unpacked in `chrome://extensions`.
-3. Render the manifest with absolute paths and your extension id, e.g.:
+2. Build the extension: `npm run build` (in repo root). Load `dist/` unpacked
+   in `chrome://extensions`. With the pinned `key` in `src/manifest.json`, the
+   ID is always `hgpcemglhcgkblfnnejacallfmfipddl` (see [keys/README.md](../keys/README.md)).
+3. Render the manifest with absolute paths and that extension id, e.g.:
 
    ```bash
    sed \
      -e "s|<ABSOLUTE_PATH_TO_LAUNCHER>|$(pwd)/native-host/target/release/autodcr-bridge|g" \
-     -e "s|<EXTENSION_ID_PLACEHOLDER>|<your-extension-id>|g" \
+     -e "s|<EXTENSION_ID_PLACEHOLDER>|hgpcemglhcgkblfnnejacallfmfipddl|g" \
      native-host/manifests/com.example.autodcr.signer.json \
      > ~/Library/Application\ Support/Google/Chrome/NativeMessagingHosts/com.example.autodcr.signer.json
    ```

@@ -24,7 +24,25 @@ This repository provides:
 
 ### End users
 
-Download the installer for your OS from the latest GitHub release and double-click. See [docs/NATIVE_HOST_INSTALL.md](docs/NATIVE_HOST_INSTALL.md).
+1. In the Draft Desk app, open the profile menu → **Install DSC Signer**.
+2. Download the Chrome extension and the native-host installer for your OS.
+3. Follow the short steps in that dialog (load the extension, run the installer, restart Chrome).
+
+You can also grab installers from the latest GitHub release — see [docs/NATIVE_HOST_INSTALL.md](docs/NATIVE_HOST_INSTALL.md).
+
+### Stable extension ID
+
+The extension manifest pins a public `key` so every Load unpacked / zip install gets the same Chrome extension ID:
+
+`hgpcemglhcgkblfnnejacallfmfipddl`
+
+Bake that ID into native-host installers (default in `scripts/build-release.sh`):
+
+```bash
+AUTODCR_EXTENSION_ID=hgpcemglhcgkblfnnejacallfmfipddl npm run build:release
+```
+
+Set the same value as GitHub Actions repo variable `AUTODCR_EXTENSION_ID`. Details: [keys/README.md](keys/README.md).
 
 ### Developers
 

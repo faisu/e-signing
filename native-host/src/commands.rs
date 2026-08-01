@@ -49,6 +49,8 @@ pub struct State {
     pkcs11_module_path: Mutex<Option<PathBuf>>,
     /// In-flight PKCS#11 load shared across concurrent commands.
     pkcs11_load_slot: Mutex<Option<Pkcs11LoadSlot>>,
+    /// Last observed token serial for the active slot; used to detect DSC swaps.
+    last_token_serial: Mutex<Option<(u64, String)>>,
 }
 
 impl State {
@@ -59,7 +61,53 @@ impl State {
             pkcs11: Mutex::new(None),
             pkcs11_module_path: Mutex::new(None),
             pkcs11_load_slot: Mutex::new(None),
+            last_token_serial: Mutex::new(None),
         }
+    }
+
+    /// Drop the loaded PKCS#11 client (runs C_Finalize) so the next call reloads
+    /// the vendor module cleanly after a DSC hot-swap.
+    fn reset_pkcs11(&self, reason: &str) {
+        tracing::info!(reason, "resetting PKCS#11 client");
+        *self.pkcs11.lock().unwrap() = None;
+        *self.pkcs11_module_path.lock().unwrap() = None;
+        *self.pkcs11_load_slot.lock().unwrap() = None;
+        *self.last_token_serial.lock().unwrap() = None;
+    }
+
+    /// If the inserted token serial changed since the last call, reinitialize
+    /// PKCS#11. HyperPKI/ePass often keep listing certs after a swap but lose
+    /// private-key objects until C_Finalize + C_Initialize.
+    fn refresh_pkcs11_if_token_changed(&self, slot_id: u64) -> anyhow::Result<()> {
+        self.pkcs11_or_load()?;
+        let serial = self.with_pkcs11(|c| Ok(c.token_serial(slot_id)))?;
+        let mut last = self.last_token_serial.lock().unwrap();
+        if let Some((prev_slot, prev_serial)) = last.as_ref() {
+            let changed = *prev_slot != slot_id
+                || serial
+                    .as_ref()
+                    .is_some_and(|s| s != prev_serial)
+                || (serial.is_none() && !prev_serial.is_empty());
+            if changed {
+                tracing::info!(
+                    slot_id,
+                    prev_slot,
+                    prev_serial = %prev_serial,
+                    new_serial = ?serial,
+                    "token serial changed; reinitializing PKCS#11"
+                );
+                drop(last);
+                self.reset_pkcs11("token_serial_changed");
+                self.pkcs11_or_load()?;
+                *self.last_token_serial.lock().unwrap() =
+                    serial.map(|s| (slot_id, s));
+                return Ok(());
+            }
+        }
+        if let Some(s) = serial {
+            *last = Some((slot_id, s));
+        }
+        Ok(())
     }
 
     fn resolve_pkcs11_module(&self) -> anyhow::Result<PathBuf> {
@@ -279,6 +327,19 @@ pub fn handle(state: &State, env: HostEnvelope) -> Vec<HostResponse> {
                 }
             };
             tracing::debug!(request_id = %id, slot_id, "LIST_CERTS requested");
+            if let Err(e) = state.refresh_pkcs11_if_token_changed(slot_id) {
+                tracing::warn!(
+                    request_id = %id,
+                    slot_id,
+                    error = %e,
+                    "LIST_CERTS token-change refresh failed"
+                );
+                return vec![HostResponse::failure(
+                    id,
+                    err::PKCS11_INIT_FAILED,
+                    e.to_string(),
+                )];
+            }
             match state.with_pkcs11(|c| c.list_certs(slot_id)) {
                 Ok(certs) => {
                     tracing::info!(
@@ -600,6 +661,10 @@ fn sign_pdf(
         )
     })?;
     tracing::debug!(slot_id, cert_id_len = cert_id.len(), "sign_pdf using certificate id");
+
+    state
+        .refresh_pkcs11_if_token_changed(slot_id)
+        .map_err(|e| SignError::Other(err::PKCS11_INIT_FAILED, e.to_string()))?;
 
     tracing::debug!(
         pdf_head_preview = %String::from_utf8_lossy(

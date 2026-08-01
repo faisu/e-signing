@@ -11,6 +11,7 @@ type PendingRequest = {
   resolve: (value: HostResponse) => void;
   reject: (error: HostError) => void;
   timer: ReturnType<typeof setTimeout>;
+  cmd: HostCmd;
 };
 
 interface NativeChunkedResult {
@@ -43,6 +44,18 @@ function requestTimeoutMs(cmd: HostCmd): number {
 
 function createError(code: string, message: string): HostError {
   return { code, message };
+}
+
+/** Drop the native port so the next request starts a fresh host/PKCS#11 process. */
+function disconnectNativePort(reason: string): void {
+  if (!nativePort) return;
+  console.info("[bridge:sw] disconnecting native port", { reason });
+  try {
+    nativePort.disconnect();
+  } catch {
+    /* already disconnected */
+  }
+  nativePort = null;
 }
 
 function ensurePort(): chrome.runtime.Port {
@@ -91,12 +104,17 @@ function ensurePort(): chrome.runtime.Port {
 
     if (response.ok) {
       pending.resolve(response);
-      return;
+    } else {
+      pending.reject(
+        response.error ?? createError("NATIVE_ERROR", "Native host returned an unknown error.")
+      );
     }
 
-    pending.reject(
-      response.error ?? createError("NATIVE_ERROR", "Native host returned an unknown error.")
-    );
+    // After a full sign attempt, recycle the host so a swapped DSC gets a clean
+    // PKCS#11 init (HyperPKI leaves stale sessions if the port stays open).
+    if (pending.cmd === "SIGN_PDF_END" && pendingById.size === 0) {
+      disconnectNativePort("sign_pdf_end_complete");
+    }
   });
 
   nativePort.onDisconnect.addListener(() => {
@@ -192,7 +210,8 @@ function sendNativeMessage(cmd: HostCmd, requestId: string, payload: unknown): P
     pendingById.set(requestId, {
       resolve,
       reject,
-      timer
+      timer,
+      cmd
     });
 
     try {

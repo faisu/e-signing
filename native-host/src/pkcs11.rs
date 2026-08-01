@@ -290,6 +290,11 @@ impl Pkcs11Client {
             .map(|t| t.serial_number().to_string())
     }
 
+    /// Public wrapper used by the command layer to detect DSC hot-swaps.
+    pub fn token_serial(&self, slot_id: u64) -> Option<String> {
+        self.current_token_serial(slot_id)
+    }
+
     fn find_slot(&self, slot_id: u64) -> Result<Slot> {
         for slot in self.inner.get_all_slots()? {
             if slot.id() == slot_id {

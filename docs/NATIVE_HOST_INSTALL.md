@@ -6,6 +6,22 @@ Xcode requirement — just download the installer for your OS and double-click.
 
 Host name (don't change): `com.example.autodcr.signer`
 
+Stable Chrome extension ID (pinned via `key` in the extension manifest —
+use this for all release builds of the native host):
+
+`hgpcemglhcgkblfnnejacallfmfipddl`
+
+## From the Draft Desk web app
+
+1. Profile menu → **Install DSC Signer**.
+2. Download **extension.zip** and the native-host installer for your OS.
+3. Unzip the extension → Chrome → `chrome://extensions` → Developer mode →
+   **Load unpacked** → select the unzipped folder.
+4. Run the installer, restart Chrome, plug in your token, and try Sign.
+
+Configure download URLs in the Next app with `NEXT_PUBLIC_DSC_*` env vars
+(see the Draft Desk `.env.example`).
+
 ## macOS
 
 1. Download `AutoDCR-Bridge-<version>.pkg` from the latest GitHub release.
